@@ -1,0 +1,385 @@
+{% extends "base.html" %}
+{% set active_page = 'tools' %}
+{% block title %}工具箱 - Learn From Video{% endblock %}
+
+{% block body %}
+<main class="main-content">
+  <div class="page-container">
+    <div class="page-header">
+      <h1 class="page-title">工具箱</h1>
+      <p class="page-subtitle">独立小工具 — 无需跑完整流水线，单独使用任何功能。</p>
+    </div>
+
+    <div class="tools-grid">
+      <div class="tool-card" data-tool="transcribe" onclick="openTool('transcribe')">
+        <div class="tool-card-icon">&#x1F3A4;</div>
+        <div class="tool-card-title">语音转文字</div>
+        <div class="tool-card-desc">上传音频或视频文件，获得完整的文字转录。支持 MP3、WAV、MP4 等格式。</div>
+        <div class="tool-card-tags">
+          <span class="tool-tag">ASR</span>
+          <span class="tool-tag">Whisper</span>
+        </div>
+      </div>
+
+      <div class="tool-card" data-tool="download" onclick="openTool('download')">
+        <div class="tool-card-icon">&#x2B07;&#xFE0F;</div>
+        <div class="tool-card-title">视频下载</div>
+        <div class="tool-card-desc">粘贴抖音、B站等视频链接，直接下载无水印视频文件到本地。</div>
+        <div class="tool-card-tags">
+          <span class="tool-tag">抖音</span>
+          <span class="tool-tag">B站</span>
+          <span class="tool-tag">yt-dlp</span>
+        </div>
+      </div>
+
+      <div class="tool-card" data-tool="summarize" onclick="openTool('summarize')">
+        <div class="tool-card-icon">&#x1F4DD;</div>
+        <div class="tool-card-title">文本总结</div>
+        <div class="tool-card-desc">粘贴或上传文本，获得结构化摘要：核心要点、笔记、金句、行动清单。</div>
+        <div class="tool-card-tags">
+          <span class="tool-tag">LLM</span>
+          <span class="tool-tag">结构化</span>
+          <span class="tool-tag">多模板</span>
+        </div>
+      </div>
+
+      <div class="tool-card" data-tool="ocr" onclick="openTool('ocr')">
+        <div class="tool-card-icon">&#x1F441;&#xFE0F;</div>
+        <div class="tool-card-title">图片识字</div>
+        <div class="tool-card-desc">上传图片或输入图片 URL，使用视觉模型提取图中文字内容。</div>
+        <div class="tool-card-tags">
+          <span class="tool-tag">VLM</span>
+          <span class="tool-tag">OCR</span>
+        </div>
+      </div>
+
+      <div class="tool-card" data-tool="parse" onclick="openTool('parse')">
+        <div class="tool-card-icon">&#x1F517;</div>
+        <div class="tool-card-title">链接解析</div>
+        <div class="tool-card-desc">粘贴任意链接，提取元信息：标题、作者、平台、时长等。</div>
+        <div class="tool-card-tags">
+          <span class="tool-tag">元数据</span>
+          <span class="tool-tag">多平台</span>
+        </div>
+      </div>
+
+      <div class="tool-card" data-tool="extract" onclick="openTool('extract')">
+        <div class="tool-card-icon">&#x1F3B5;</div>
+        <div class="tool-card-title">提取音频</div>
+        <div class="tool-card-desc">从视频文件或链接中提取音频轨道，输出干净的 MP3 文件。</div>
+        <div class="tool-card-tags">
+          <span class="tool-tag">FFmpeg</span>
+          <span class="tool-tag">MP3</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- 工具面板 -->
+<div class="tool-panel" id="panel-transcribe">
+  <div class="tool-panel-content">
+    <div class="tool-panel-header">
+      <div class="tool-panel-title">&#x1F3A4; 语音转文字</div>
+      <button class="tool-panel-close" onclick="closeTool()">&times;</button>
+    </div>
+    <div class="tool-panel-body">
+      <div class="form-group">
+        <div class="upload-zone" id="transcribe-upload">
+          <div class="upload-zone-icon">&#x1F4C1;</div>
+          <div class="upload-zone-text">拖拽音频/视频文件到这里，或点击选择</div>
+          <div class="upload-zone-hint">支持 MP3、WAV、FLAC、OGG、MP4、MKV、AVI</div>
+          <input type="file" accept="audio/*,video/*" onchange="handleTranscribeFile(this)">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">语言（可选）</label>
+        <select class="form-select" id="transcribe-lang">
+          <option value="">自动识别</option>
+          <option value="zh">中文</option>
+          <option value="en">英文</option>
+          <option value="ja">日文</option>
+        </select>
+      </div>
+      <div id="transcribe-progress" class="hidden">
+        <div class="progress-bar"><div class="progress-bar-fill" id="transcribe-bar" style="width:0%"></div></div>
+        <div class="text-sm text-muted mt-4" id="transcribe-status">准备中...</div>
+      </div>
+      <div class="result-area" id="transcribe-result"></div>
+    </div>
+    <div class="tool-panel-footer">
+      <button class="btn btn-secondary" onclick="closeTool()">关闭</button>
+      <button class="btn btn-primary" id="transcribe-btn" onclick="runTranscribe()" disabled>开始转录</button>
+    </div>
+  </div>
+</div>
+
+<div class="tool-panel" id="panel-download">
+  <div class="tool-panel-content">
+    <div class="tool-panel-header">
+      <div class="tool-panel-title">&#x2B07;&#xFE0F; 视频下载</div>
+      <button class="tool-panel-close" onclick="closeTool()">&times;</button>
+    </div>
+    <div class="tool-panel-body">
+      <div class="form-group">
+        <label class="form-label">视频链接</label>
+        <input type="url" class="form-input" id="download-url" placeholder="https://www.douyin.com/video/...">
+      </div>
+      <div id="download-progress" class="hidden">
+        <div class="flex items-center gap-3">
+          <div class="spinner"></div>
+          <span class="text-sm text-muted">正在下载...</span>
+        </div>
+      </div>
+      <div class="result-area" id="download-result"></div>
+    </div>
+    <div class="tool-panel-footer">
+      <button class="btn btn-secondary" onclick="closeTool()">关闭</button>
+      <button class="btn btn-primary" onclick="runDownload()">开始下载</button>
+    </div>
+  </div>
+</div>
+
+<div class="tool-panel" id="panel-summarize">
+  <div class="tool-panel-content">
+    <div class="tool-panel-header">
+      <div class="tool-panel-title">&#x1F4DD; 文本总结</div>
+      <button class="tool-panel-close" onclick="closeTool()">&times;</button>
+    </div>
+    <div class="tool-panel-body">
+      <div class="form-group">
+        <label class="form-label">文本内容</label>
+        <textarea class="form-textarea" id="summarize-text" placeholder="粘贴文本，或上传文件..." rows="6"></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">或上传文件</label>
+        <input type="file" class="form-input" id="summarize-file" accept=".txt,.md,.srt,.vtt">
+      </div>
+      <div class="form-group">
+        <label class="form-label">总结模板</label>
+        <select class="form-select" id="summarize-template">
+          <option value="knowledge">知识笔记（结构化）</option>
+          <option value="tutorial">教程步骤</option>
+          <option value="opinion">观点提炼</option>
+          <option value="quick">快速摘要</option>
+        </select>
+      </div>
+      <div class="result-area" id="summarize-result"></div>
+    </div>
+    <div class="tool-panel-footer">
+      <button class="btn btn-secondary" onclick="closeTool()">关闭</button>
+      <button class="btn btn-primary" onclick="runSummarize()">生成总结</button>
+    </div>
+  </div>
+</div>
+
+<div class="tool-panel" id="panel-ocr">
+  <div class="tool-panel-content">
+    <div class="tool-panel-header">
+      <div class="tool-panel-title">&#x1F441;&#xFE0F; 图片识字</div>
+      <button class="tool-panel-close" onclick="closeTool()">&times;</button>
+    </div>
+    <div class="tool-panel-body">
+      <div class="form-group">
+        <div class="upload-zone">
+          <div class="upload-zone-icon">&#x1F5BC;&#xFE0F;</div>
+          <div class="upload-zone-text">拖拽图片到这里，或点击选择</div>
+          <div class="upload-zone-hint">JPG、PNG、WebP</div>
+          <input type="file" accept="image/*" id="ocr-file">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">或输入图片 URL</label>
+        <input type="url" class="form-input" id="ocr-url" placeholder="https://...">
+      </div>
+      <div class="result-area" id="ocr-result"></div>
+    </div>
+    <div class="tool-panel-footer">
+      <button class="btn btn-secondary" onclick="closeTool()">关闭</button>
+      <button class="btn btn-primary" onclick="runOCR()">开始识别</button>
+    </div>
+  </div>
+</div>
+
+<div class="tool-panel" id="panel-parse">
+  <div class="tool-panel-content">
+    <div class="tool-panel-header">
+      <div class="tool-panel-title">&#x1F517; 链接解析</div>
+      <button class="tool-panel-close" onclick="closeTool()">&times;</button>
+    </div>
+    <div class="tool-panel-body">
+      <div class="form-group">
+        <label class="form-label">链接地址</label>
+        <input type="url" class="form-input" id="parse-url" placeholder="粘贴任意视频/文章链接...">
+      </div>
+      <div class="result-area" id="parse-result"></div>
+    </div>
+    <div class="tool-panel-footer">
+      <button class="btn btn-secondary" onclick="closeTool()">关闭</button>
+      <button class="btn btn-primary" onclick="runParse()">开始解析</button>
+    </div>
+  </div>
+</div>
+
+<div class="tool-panel" id="panel-extract">
+  <div class="tool-panel-content">
+    <div class="tool-panel-header">
+      <div class="tool-panel-title">&#x1F3B5; 提取音频</div>
+      <button class="tool-panel-close" onclick="closeTool()">&times;</button>
+    </div>
+    <div class="tool-panel-body">
+      <div class="form-group">
+        <div class="upload-zone">
+          <div class="upload-zone-icon">&#x1F3AC;</div>
+          <div class="upload-zone-text">拖拽视频文件到这里</div>
+          <div class="upload-zone-hint">MP4、MKV、AVI、MOV、WebM</div>
+          <input type="file" accept="video/*" id="extract-file">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">或输入视频链接</label>
+        <input type="url" class="form-input" id="extract-url" placeholder="https://...">
+      </div>
+      <div id="extract-progress" class="hidden">
+        <div class="flex items-center gap-3">
+          <div class="spinner"></div>
+          <span class="text-sm text-muted">正在提取音频...</span>
+        </div>
+      </div>
+      <div class="result-area" id="extract-result"></div>
+    </div>
+    <div class="tool-panel-footer">
+      <button class="btn btn-secondary" onclick="closeTool()">关闭</button>
+      <button class="btn btn-primary" onclick="runExtract()">开始提取</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentPanel = null;
+let transcribeFile = null;
+
+function openTool(name) {
+  closeTool();
+  const panel = document.getElementById(`panel-${name}`);
+  if (panel) { panel.classList.add('active'); currentPanel = panel; }
+}
+function closeTool() {
+  if (currentPanel) { currentPanel.classList.remove('active'); currentPanel = null; }
+}
+document.querySelectorAll('.tool-panel').forEach(p => p.addEventListener('click', e => { if(e.target===p) closeTool(); }));
+document.addEventListener('keydown', e => { if(e.key==='Escape') closeTool(); });
+
+function handleTranscribeFile(input) {
+  transcribeFile = input.files[0];
+  if (transcribeFile) {
+    document.getElementById('transcribe-btn').disabled = false;
+    input.closest('.upload-zone').querySelector('.upload-zone-text').textContent = transcribeFile.name;
+  }
+}
+
+async function runTranscribe() {
+  if (!transcribeFile) return;
+  const progress = document.getElementById('transcribe-progress');
+  const result = document.getElementById('transcribe-result');
+  const bar = document.getElementById('transcribe-bar');
+  const status = document.getElementById('transcribe-status');
+  progress.classList.remove('hidden'); result.textContent = '';
+  status.textContent = '\u4E0A\u4F20\u4E2D...'; bar.style.width = '10%';
+  const form = new FormData();
+  form.append('file', transcribeFile);
+  const lang = document.getElementById('transcribe-lang').value;
+  if (lang) form.append('language', lang);
+  try {
+    const resp = await fetch('/api/tools/transcribe', {method:'POST', body:form});
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.detail||'\u8F6C\u5F55\u5931\u8D25'); }
+    bar.style.width = '100%'; status.textContent = '\u5B8C\u6210\uFF01';
+    const data = await resp.json(); result.textContent = data.text;
+  } catch(e) { status.textContent = '\u9519\u8BEF: ' + e.message; }
+}
+
+async function runDownload() {
+  const url = document.getElementById('download-url').value.trim();
+  if (!url) return;
+  const progress = document.getElementById('download-progress');
+  const result = document.getElementById('download-result');
+  progress.classList.remove('hidden'); result.textContent = '';
+  const form = new FormData(); form.append('url', url);
+  try {
+    const resp = await fetch('/api/tools/download', {method:'POST', body:form});
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.detail||'\u4E0B\u8F7D\u5931\u8D25'); }
+    const data = await resp.json(); progress.classList.add('hidden');
+    const sizeKB = (data.file_size/1024).toFixed(0);
+    result.innerHTML = `<strong>${data.title}</strong><br>\u4F5C\u8005: ${data.author}<br>\u5927\u5C0F: ${sizeKB} KB<br><a href="/api/tools/download/${data.task_id}/file" target="_blank" style="color:var(--accent-text)">\u4E0B\u8F7D\u6587\u4EF6 &rarr;</a>`;
+  } catch(e) { progress.classList.add('hidden'); result.textContent = '\u9519\u8BEF: ' + e.message; }
+}
+
+async function runSummarize() {
+  const text = document.getElementById('summarize-text').value.trim();
+  const fileInput = document.getElementById('summarize-file');
+  const template = document.getElementById('summarize-template').value;
+  const result = document.getElementById('summarize-result');
+  const form = new FormData();
+  if (fileInput.files[0]) form.append('file', fileInput.files[0]);
+  else if (text) form.append('text', text);
+  else return;
+  form.append('template', template);
+  result.textContent = '\u6B63\u5728\u751F\u6210\u603B\u7ED3...';
+  try {
+    const resp = await fetch('/api/tools/summarize', {method:'POST', body:form});
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.detail||'\u603B\u7ED3\u5931\u8D25'); }
+    const data = await resp.json(); result.textContent = data.summary;
+  } catch(e) { result.textContent = '\u9519\u8BEF: ' + e.message; }
+}
+
+async function runOCR() {
+  const fileInput = document.getElementById('ocr-file');
+  const url = document.getElementById('ocr-url').value.trim();
+  const result = document.getElementById('ocr-result');
+  const form = new FormData();
+  if (fileInput.files[0]) form.append('file', fileInput.files[0]);
+  else if (url) form.append('url', url);
+  else return;
+  result.textContent = '\u8BC6\u522B\u4E2D...';
+  try {
+    const resp = await fetch('/api/tools/ocr', {method:'POST', body:form});
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.detail||'OCR \u5931\u8D25'); }
+    const data = await resp.json(); result.textContent = data.text;
+  } catch(e) { result.textContent = '\u9519\u8BEF: ' + e.message; }
+}
+
+async function runParse() {
+  const url = document.getElementById('parse-url').value.trim();
+  if (!url) return;
+  const result = document.getElementById('parse-result');
+  const form = new FormData(); form.append('url', url);
+  result.textContent = '\u89E3\u6790\u4E2D...';
+  try {
+    const resp = await fetch('/api/tools/parse', {method:'POST', body:form});
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.detail||'\u89E3\u6790\u5931\u8D25'); }
+    const data = await resp.json(); result.textContent = JSON.stringify(data, null, 2);
+  } catch(e) { result.textContent = '\u9519\u8BEF: ' + e.message; }
+}
+
+async function runExtract() {
+  const fileInput = document.getElementById('extract-file');
+  const url = document.getElementById('extract-url').value.trim();
+  const progress = document.getElementById('extract-progress');
+  const result = document.getElementById('extract-result');
+  const form = new FormData();
+  if (fileInput.files[0]) form.append('file', fileInput.files[0]);
+  else if (url) form.append('url', url);
+  else return;
+  progress.classList.remove('hidden'); result.textContent = '';
+  try {
+    const resp = await fetch('/api/tools/extract-audio', {method:'POST', body:form});
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.detail||'\u63D0\u53D6\u5931\u8D25'); }
+    const data = await resp.json(); progress.classList.add('hidden');
+    const sizeKB = (data.file_size/1024).toFixed(0);
+    result.innerHTML = `\u97F3\u9891\u5DF2\u63D0\u53D6 (${sizeKB} KB)<br><a href="/api/tools/extract-audio/${data.task_id}/file" target="_blank" style="color:var(--accent-text)">\u4E0B\u8F7D MP3 &rarr;</a>`;
+  } catch(e) { progress.classList.add('hidden'); result.textContent = '\u9519\u8BEF: ' + e.message; }
+}
+</script>
+{% endblock %}

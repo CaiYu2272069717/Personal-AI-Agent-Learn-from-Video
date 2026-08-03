@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Config (secrets)
+config.local.json
+config.local.*
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Data
+data/
+workdir/
+library/
+conversations/
+workspace/
+
+# Local runtime artifacts
+output/
+temp/
+.playwright-cli/
+.pytest_cache/
+
+# Media temp
+*.mp4
+*.mp3
+*.wav
+
+# OS
+.DS_Store
+Thumbs.db
+
+# WorkBuddy
+.workbuddy/

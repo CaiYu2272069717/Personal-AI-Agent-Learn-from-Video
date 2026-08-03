@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% set active_page = 'submit' %}
+{% block title %}提交内容 - Learn From Video{% endblock %}
+
+{% block body %}
+<main class="main-content">
+  <div class="page-container">
+    <div class="submit-card">
+      <div class="page-header">
+        <h1 class="page-title">提交内容</h1>
+        <p class="page-subtitle">粘贴视频或文章链接，自动完成下载 → 转录 → 总结 → 入库</p>
+      </div>
+
+      <div class="submit-modes">
+        <button class="submit-mode active" onclick="setMode(this, 'auto')">全自动</button>
+        <button class="submit-mode" onclick="setMode(this, 'semi')">半自动</button>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">链接地址</label>
+        <input type="url" class="form-input" id="submit-url" placeholder="粘贴抖音、B站或文章链接..." onkeydown="if(event.key==='Enter')submitUrl()">
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-4)">
+        <div class="form-group">
+          <label class="form-label">总结模板</label>
+          <select class="form-select" id="tpl-select">
+            <option value="knowledge">知识笔记</option>
+            <option value="tutorial">教程步骤</option>
+            <option value="opinion">观点提炼</option>
+            <option value="quick">快速摘要</option>
+          </select>
+        </div>
+        <div class="form-group" id="exit-group" style="display:none">
+          <label class="form-label">执行到</label>
+          <select class="form-select" id="exit-select">
+            <option value="2">下载视频</option>
+            <option value="3">提取音频</option>
+            <option value="5">转录文本</option>
+            <option value="6">生成总结</option>
+            <option value="7" selected>全部入库</option>
+          </select>
+        </div>
+      </div>
+
+      <button class="btn btn-primary btn-lg w-full" onclick="submitUrl()">开始处理</button>
+
+      <div class="submit-progress" id="submit-progress">
+        <div class="progress-steps" id="progress-steps"></div>
+      </div>
+
+      <div class="result-area" id="submit-result"></div>
+    </div>
+  </div>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentMode = 'auto';
+const stages = ['解析链接', '下载媒体', '提取音频', '分割音频', '语音转录', 'AI 总结', '入库'];
+
+function setMode(btn, mode) {
+  document.querySelectorAll('.submit-mode').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  currentMode = mode;
+  document.getElementById('exit-group').style.display = mode === 'semi' ? '' : 'none';
+}
+
+async function submitUrl() {
+  const url = document.getElementById('submit-url').value.trim();
+  if (!url) return;
+
+  const progress = document.getElementById('submit-progress');
+  const result = document.getElementById('submit-result');
+  progress.classList.add('active');
+  result.textContent = '';
+
+  // Build progress steps
+  const stepsEl = document.getElementById('progress-steps');
+  stepsEl.innerHTML = stages.map((s, i) => `
+    <div class="progress-step" id="pstep-${i}">
+      <div class="progress-step-dot"></div>
+      <span>${s}</span>
+    </div>
+  `).join('');
+
+  try {
+    const template = document.getElementById('tpl-select').value;
+    const exitStage = currentMode === 'semi' ? parseInt(document.getElementById('exit-select').value) : 7;
+
+    const resp = await fetch('/api/pipeline/submit', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url, mode: currentMode, exit_stage: exitStage, template}),
+    });
+    const data = await resp.json();
+
+    if (data.task_id) {
+      const es = new EventSource(`/api/pipeline/tasks/${data.task_id}/stream`);
+      es.onmessage = (e) => {
+        const d = JSON.parse(e.data);
+        if (d.type === 'progress') {
+          for (let i = 0; i < stages.length; i++) {
+            const el = document.getElementById(`pstep-${i}`);
+            el.className = 'progress-step';
+            if (i < d.stage - 1) el.classList.add('done');
+            else if (i === d.stage - 1) el.classList.add('active');
+          }
+        } else if (d.type === 'done') {
+          es.close();
+          if (d.status === 'completed') {
+            for (let i = 0; i < stages.length; i++) {
+              document.getElementById(`pstep-${i}`).className = 'progress-step done';
+            }
+            result.textContent = '\u2705 处理完成！已入库。';
+          } else {
+            result.textContent = '\u274C 失败: ' + (d.error || '未知错误');
+          }
+        }
+      };
+      es.onerror = () => es.close();
+    } else {
+      result.textContent = data.error || '提交失败';
+    }
+  } catch(e) {
+    result.textContent = '\u274C 网络错误: ' + e.message;
+  }
+}
+</script>
+{% endblock %}

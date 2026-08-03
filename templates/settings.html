@@ -1,0 +1,353 @@
+{% extends "base.html" %}
+{% set active_page = 'settings' %}
+{% block title %}设置 - Learn From Video{% endblock %}
+
+{% block body %}
+<main class="main-content">
+  <div class="page-container">
+    <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--space-8)">
+      <div>
+        <h1 class="page-title">设置</h1>
+        <p class="page-subtitle">配置 API 密钥、模型和系统行为。</p>
+      </div>
+      <div style="display:flex;align-items:center;gap:var(--space-3)">
+        <span id="save-status" class="text-sm text-muted"></span>
+        <button class="btn btn-primary" onclick="saveSettings()">保存设置</button>
+      </div>
+    </div>
+
+    <div class="settings-grid" id="settings-form">
+      <!-- ASR -->
+      <div class="settings-section">
+        <div class="settings-section-header">
+          <div class="settings-section-icon" style="background:rgba(139,124,246,.12)">&#x1F3A4;</div>
+          <div class="settings-section-title">ASR 语音识别</div>
+        </div>
+        <div class="settings-section-body">
+          <div class="form-group">
+            <label class="form-label">Base URL</label>
+            <input type="text" class="form-input" data-path="asr.base_url" placeholder="https://api.openai.com/v1">
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-4)">
+            <div class="form-group">
+              <label class="form-label">API Key</label>
+              <input type="password" class="form-input" data-path="asr.api_key">
+            </div>
+            <div class="form-group">
+              <label class="form-label">模型</label>
+              <div class="model-select-group">
+                <div class="model-select-wrapper">
+                  <input type="text" class="form-input model-input" data-path="asr.model" placeholder="whisper-1" list="asr-models">
+                  <datalist id="asr-models"></datalist>
+                </div>
+                <button class="btn-fetch-models" onclick="fetchModels('asr', this)" title="获取模型列表">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 总结 LLM -->
+      <div class="settings-section">
+        <div class="settings-section-header">
+          <div class="settings-section-icon" style="background:rgba(232,178,80,.12)">&#x1F4DD;</div>
+          <div class="settings-section-title">总结 LLM</div>
+        </div>
+        <div class="settings-section-body">
+          <div class="form-group">
+            <label class="form-label">Base URL</label>
+            <input type="text" class="form-input" data-path="llm.base_url">
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-4)">
+            <div class="form-group">
+              <label class="form-label">API Key</label>
+              <input type="password" class="form-input" data-path="llm.api_key">
+            </div>
+            <div class="form-group">
+              <label class="form-label">模型</label>
+              <div class="model-select-group">
+                <div class="model-select-wrapper">
+                  <input type="text" class="form-input model-input" data-path="llm.model" placeholder="deepseek-ai/DeepSeek-V3" list="llm-models">
+                  <datalist id="llm-models"></datalist>
+                </div>
+                <button class="btn-fetch-models" onclick="fetchModels('llm', this)" title="获取模型列表">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Agent LLM -->
+      <div class="settings-section">
+        <div class="settings-section-header">
+          <div class="settings-section-icon" style="background:rgba(139,92,246,.12)">&#x1F916;</div>
+          <div class="settings-section-title">Agent LLM</div>
+        </div>
+        <div class="settings-section-body">
+          <div class="form-group">
+            <label class="form-label">Base URL</label>
+            <input type="text" class="form-input" data-path="agent_llm.base_url">
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-4)">
+            <div class="form-group">
+              <label class="form-label">API Key</label>
+              <input type="password" class="form-input" data-path="agent_llm.api_key">
+            </div>
+            <div class="form-group">
+              <label class="form-label">模型</label>
+              <div class="model-select-group">
+                <div class="model-select-wrapper">
+                  <input type="text" class="form-input model-input" data-path="agent_llm.model" placeholder="deepseek-ai/DeepSeek-V3" list="agent_llm-models">
+                  <datalist id="agent_llm-models"></datalist>
+                </div>
+                <button class="btn-fetch-models" onclick="fetchModels('agent_llm', this)" title="获取模型列表">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 嵌入模型 -->
+      <div class="settings-section">
+        <div class="settings-section-header">
+          <div class="settings-section-icon" style="background:rgba(79,200,232,.12)">&#x1F9EC;</div>
+          <div class="settings-section-title">嵌入模型</div>
+        </div>
+        <div class="settings-section-body">
+          <div class="form-group">
+            <label class="form-label">Base URL</label>
+            <input type="text" class="form-input" data-path="embedding.base_url">
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-4)">
+            <div class="form-group">
+              <label class="form-label">API Key</label>
+              <input type="password" class="form-input" data-path="embedding.api_key">
+            </div>
+            <div class="form-group">
+              <label class="form-label">模型</label>
+              <div class="model-select-group">
+                <div class="model-select-wrapper">
+                  <input type="text" class="form-input model-input" data-path="embedding.model" placeholder="BAAI/bge-m3" list="embedding-models">
+                  <datalist id="embedding-models"></datalist>
+                </div>
+                <button class="btn-fetch-models" onclick="fetchModels('embedding', this)" title="获取模型列表">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- OCR -->
+      <div class="settings-section">
+        <div class="settings-section-header">
+          <div class="settings-section-icon" style="background:rgba(240,112,144,.12)">&#x1F441;&#xFE0F;</div>
+          <div class="settings-section-title">OCR 图文识别</div>
+        </div>
+        <div class="settings-section-body">
+          <div class="form-hint-block">
+            OCR 使用视觉语言模型（VLM）识别图片文字。默认使用硅基流动（SiliconFlow）的 Qwen2.5-VL 模型。<br>
+            API Key 填写你的 <strong>SiliconFlow API Key</strong>（与上方 ASR/LLM 相同提供商时可复用同一个 Key）。
+          </div>
+          <div class="form-group">
+            <label class="form-label">VLM Base URL</label>
+            <input type="text" class="form-input" data-path="ocr.vlm_base_url" placeholder="https://api.siliconflow.cn/v1">
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-4)">
+            <div class="form-group">
+              <label class="form-label">VLM API Key</label>
+              <input type="password" class="form-input" data-path="ocr.vlm_api_key">
+              <div class="form-hint">与 ASR/LLM 使用同一平台时可填相同 Key</div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">VLM 模型</label>
+              <div class="model-select-group">
+                <div class="model-select-wrapper">
+                  <input type="text" class="form-input model-input" data-path="ocr.vlm_model" placeholder="Qwen/Qwen2.5-VL-7B-Instruct" list="ocr-models">
+                  <datalist id="ocr-models"></datalist>
+                </div>
+                <button class="btn-fetch-models" onclick="fetchModels('ocr', this)" title="获取模型列表">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-4)">
+            <div class="form-group">
+              <label class="form-label">OCR 后端</label>
+              <select class="form-select" data-path="ocr.backend">
+                <option value="vlm">视觉 LLM（推荐）</option>
+                <option value="paddleocr">PaddleOCR（本地）</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 联网搜索 -->
+      <div class="settings-section">
+        <div class="settings-section-header">
+          <div class="settings-section-icon" style="background:rgba(107,179,240,.12)">&#x1F310;</div>
+          <div class="settings-section-title">联网搜索</div>
+        </div>
+        <div class="settings-section-body">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-4)">
+            <div class="form-group">
+              <label class="form-label">Tavily API Key</label>
+              <input type="password" class="form-input" data-path="web_search.tavily_api_key">
+              <div class="form-hint">从 <a href="https://tavily.com" target="_blank">tavily.com</a> 获取</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 流水线 -->
+      <div class="settings-section">
+        <div class="settings-section-header">
+          <div class="settings-section-icon" style="background:rgba(79,216,159,.12)">&#x2699;&#xFE0F;</div>
+          <div class="settings-section-title">流水线参数</div>
+        </div>
+        <div class="settings-section-body">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-4)">
+            <div class="form-group">
+              <label class="form-label">分割阈值 (MB)</label>
+              <input type="number" class="form-input" data-path="pipeline.split_size_mb">
+            </div>
+            <div class="form-group">
+              <label class="form-label">分割阈值 (分钟)</label>
+              <input type="number" class="form-input" data-path="pipeline.split_duration_min">
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+loadSettings();
+
+async function loadSettings() {
+  try {
+    const resp = await fetch('/api/settings');
+    const data = await resp.json();
+    document.querySelectorAll('[data-path]').forEach(el => {
+      const parts = el.dataset.path.split('.');
+      let val = data;
+      for (const p of parts) val = val?.[p];
+      if (val === undefined || val === null) return;
+      el.value = val;
+    });
+  } catch(e) {}
+}
+
+async function saveSettings() {
+  const payload = {};
+  document.querySelectorAll('[data-path]').forEach(el => {
+    const parts = el.dataset.path.split('.');
+    const section = parts[0];
+    const key = parts.slice(1).join('.');
+    if (!payload[section]) payload[section] = {};
+    // 处理嵌套 key (如 ocr.vlm_api_key)
+    if (parts.length === 2) {
+      payload[section][parts[1]] = el.type === 'number' ? (parseInt(el.value)||0) : el.value;
+    }
+  });
+  const resp = await fetch('/api/settings', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  });
+  const data = await resp.json();
+  const status = document.getElementById('save-status');
+  status.textContent = data.status === 'ok' ? '✓ 已保存' : '✗ 失败';
+  status.style.color = data.status === 'ok' ? 'var(--success)' : 'var(--error)';
+  setTimeout(() => status.textContent = '', 3000);
+}
+
+// === 获取模型列表 ===
+async function fetchModels(section, btn) {
+  // 获取该 section 的 base_url 和 api_key
+  let baseUrlPath, apiKeyPath;
+  if (section === 'ocr') {
+    baseUrlPath = 'ocr.vlm_base_url';
+    apiKeyPath = 'ocr.vlm_api_key';
+  } else {
+    baseUrlPath = section + '.base_url';
+    apiKeyPath = section + '.api_key';
+  }
+
+  const baseUrlEl = document.querySelector(`[data-path="${baseUrlPath}"]`);
+  const apiKeyEl = document.querySelector(`[data-path="${apiKeyPath}"]`);
+
+  if (!baseUrlEl || !apiKeyEl) return;
+
+  const baseUrl = baseUrlEl.value.trim();
+  const apiKey = apiKeyEl.value.trim();
+
+  if (!baseUrl || !apiKey) {
+    alert('请先填写 Base URL 和 API Key');
+    return;
+  }
+
+  // 找到按钮并显示加载状态
+  btn.classList.add('loading');
+  btn.disabled = true;
+
+  try {
+    const resp = await fetch('/api/settings/models', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({base_url: baseUrl, api_key: apiKey, section}),
+    });
+    const data = await resp.json();
+
+    if (data.error) {
+      alert('获取失败: ' + data.error);
+      return;
+    }
+
+    if (!data.models || data.models.length === 0) {
+      alert('未获取到模型列表');
+      return;
+    }
+
+    // 填充 datalist
+    const listId = section + '-models';
+    const datalist = document.getElementById(listId);
+    if (datalist) {
+      datalist.innerHTML = data.models.map(m => `<option value="${m}">`).join('');
+    }
+
+    // 聚焦输入框以显示下拉
+    let modelPath;
+    if (section === 'ocr') modelPath = 'ocr.vlm_model';
+    else modelPath = section + '.model';
+    const modelInput = document.querySelector(`[data-path="${modelPath}"]`);
+    if (modelInput) {
+      modelInput.focus();
+      // 触发显示 datalist
+      modelInput.value = modelInput.value;
+    }
+
+    // 提示成功
+    btn.classList.add('success');
+    setTimeout(() => btn.classList.remove('success'), 2000);
+  } catch(e) {
+    alert('请求错误: ' + e.message);
+  } finally {
+    btn.classList.remove('loading');
+    btn.disabled = false;
+  }
+}
+</script>
+{% endblock %}

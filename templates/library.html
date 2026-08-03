@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% set active_page = 'library' %}
+{% block title %}知识库 - Learn From Video{% endblock %}
+
+{% block body %}
+<main class="main-content">
+  <div class="page-container">
+    <div class="page-header">
+      <h1 class="page-title">知识库</h1>
+      <p class="page-subtitle">你的所有已处理内容，可搜索、可整理。</p>
+    </div>
+
+    <div class="search-wrapper">
+      <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" class="search-input" id="library-search" placeholder="搜索标题、内容、标签..." onkeydown="if(event.key==='Enter')searchLibrary()">
+    </div>
+
+    <div class="library-grid" id="library-grid"></div>
+
+    <div class="empty-state" id="library-empty">
+      <div class="empty-state-icon">&#x1F4DA;</div>
+      <h3>知识库为空</h3>
+      <p>提交视频或文章链接，开始积累你的知识。</p>
+    </div>
+  </div>
+</main>
+
+<!-- 详情面板 -->
+<div class="tool-panel" id="detail-modal">
+  <div class="tool-panel-content" style="max-width:720px;max-height:90vh">
+    <div class="tool-panel-header">
+      <div class="tool-panel-title" id="detail-title">详情</div>
+      <button class="tool-panel-close" onclick="closeDetail()">&times;</button>
+    </div>
+    <div class="tool-panel-body" id="detail-content" style="line-height:1.8;font-size:14px"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+loadItems();
+
+async function loadItems(q) {
+  const url = q ? `/api/knowledge/items?q=${encodeURIComponent(q)}` : '/api/knowledge/items';
+  try {
+    const resp = await fetch(url);
+    const data = await resp.json();
+    renderItems(data.items || []);
+  } catch(e) { renderItems([]); }
+}
+
+function searchLibrary() {
+  loadItems(document.getElementById('library-search').value.trim());
+}
+
+function renderItems(items) {
+  const grid = document.getElementById('library-grid');
+  const empty = document.getElementById('library-empty');
+  if (!items.length) { grid.innerHTML = ''; empty.style.display = ''; return; }
+  empty.style.display = 'none';
+  grid.innerHTML = items.map(item => {
+    const tags = (item.tags||'').split(',').filter(Boolean).slice(0,3);
+    const preview = (item.summary_md||'').slice(0,120);
+    const date = item.created_at ? new Date(item.created_at).toLocaleDateString('zh-CN') : '';
+    return `
+      <div class="library-card" onclick="showDetail(${item.id})">
+        <div class="library-card-title">${esc(item.title)}</div>
+        <div class="library-card-meta"><span>${item.source||''}</span><span>${date}</span></div>
+        <div class="library-card-summary">${esc(preview)}</div>
+        <div class="library-card-tags">${tags.map(t=>`<span class="badge badge-accent">${esc(t)}</span>`).join('')}</div>
+      </div>`;
+  }).join('');
+}
+
+async function showDetail(id) {
+  const resp = await fetch(`/api/knowledge/items/${id}`);
+  const item = await resp.json();
+  if (item.error) return;
+  document.getElementById('detail-title').textContent = item.title;
+  document.getElementById('detail-content').innerHTML = `
+    <div style="color:var(--text-secondary);font-size:12px;margin-bottom:16px">
+      ${item.source||''} &middot; ${item.author||''} &middot; ${item.created_at||''}
+    </div>
+    <div>${simpleMarkdown(item.summary_md || '\u65E0\u603B\u7ED3\u5185\u5BB9')}</div>
+    <details style="margin-top:24px">
+      <summary style="cursor:pointer;color:var(--text-tertiary);font-size:13px">\u67E5\u770B\u539F\u59CB\u8F6C\u5F55</summary>
+      <pre style="white-space:pre-wrap;font-size:12px;margin-top:8px;color:var(--text-secondary);max-height:300px;overflow-y:auto">${esc(item.transcript || '\u65E0')}</pre>
+    </details>
+    <div style="margin-top:24px;display:flex;gap:8px">
+      <button class="btn btn-secondary" onclick="deleteItem(${id})">\u5220\u9664</button>
+    </div>`;
+  document.getElementById('detail-modal').classList.add('active');
+}
+
+function closeDetail() { document.getElementById('detail-modal').classList.remove('active'); }
+
+async function deleteItem(id) {
+  if (!confirm('\u786E\u5B9A\u5220\u9664\u8FD9\u6761\u8BB0\u5F55\uFF1F')) return;
+  await fetch(`/api/knowledge/items/${id}`, {method:'DELETE'});
+  closeDetail(); loadItems();
+}
+
+function simpleMarkdown(md) {
+  return md
+    .replace(/^### (.+)$/gm, '<h4 style="margin:12px 0 4px;font-weight:600">$1</h4>')
+    .replace(/^## (.+)$/gm, '<h3 style="margin:16px 0 6px;font-weight:600;color:var(--accent)">$1</h3>')
+    .replace(/^> (.+)$/gm, '<blockquote style="border-left:2px solid var(--accent);padding-left:12px;color:var(--text-secondary);margin:8px 0">$1</blockquote>')
+    .replace(/^- (.+)$/gm, '<li style="margin-left:16px">$1</li>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/`(.+?)`/g, '<code style="background:var(--bg-hover);padding:1px 4px;border-radius:3px;font-size:12px">$1</code>')
+    .replace(/\n\n/g, '<br><br>').replace(/\n/g, '<br>');
+}
+
+function esc(t) { const d=document.createElement('div'); d.textContent=t||''; return d.innerHTML; }
+</script>
+{% endblock %}
