@@ -1,4 +1,4 @@
-"""数据库初始化与基础操作：SQLite + FTS5 + sqlite-vec"""
+﻿"""数据库初始化与基础操作：SQLite + FTS5 + sqlite-vec"""
 
 import asyncio
 import sqlite3
@@ -90,11 +90,36 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
 
+-- Agent 后台运行记录。SSE 连接只是观察者，断开不会终止运行。
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id TEXT PRIMARY KEY,
+    conversation_id INTEGER NOT NULL,
+    user_message_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'queued',  -- queued/running/waiting/completed/failed/cancelled
+    error TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_runs_conv ON agent_runs(conversation_id, created_at);
+
+-- 可重放的 Agent 过程事件，用于页面切换后恢复思考/工具执行状态。
+CREATE TABLE IF NOT EXISTS agent_run_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    event_json TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_run_events_run ON agent_run_events(run_id, id);
+
 -- Agent 文件快照（用于 Revert）
 CREATE TABLE IF NOT EXISTS snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conversation_id INTEGER NOT NULL,
-    turn_index INTEGER NOT NULL,
+    turn_index INTEGER NOT NULL,  -- 对应触发该轮的 user message id
     file_path TEXT NOT NULL,
     content_before BLOB,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -124,6 +149,19 @@ async def init_db() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(str(DB_PATH)) as db:
         await db.executescript(SCHEMA_SQL)
+        # 兼容已经由旧版 schema 创建的数据库。
+        cursor = await db.execute("PRAGMA table_info(agent_runs)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "user_message_id" not in columns:
+            await db.execute("ALTER TABLE agent_runs ADD COLUMN user_message_id INTEGER")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_runs_message "
+            "ON agent_runs(conversation_id, user_message_id)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_snapshots_turn "
+            "ON snapshots(conversation_id, turn_index, file_path)"
+        )
         await db.commit()
 
 

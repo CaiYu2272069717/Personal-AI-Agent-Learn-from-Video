@@ -1,4 +1,4 @@
-"""链接解析子包"""
+﻿"""链接解析子包"""
 
 from .router import parse_url, detect_source_type
 from .douyin_parser import DouyinParser

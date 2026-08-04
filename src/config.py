@@ -1,4 +1,4 @@
-"""统一配置管理：四组独立 API 配置 + 系统参数
+﻿"""统一配置管理：四组独立 API 配置 + 系统参数
 
 配置优先级：config.local.json > 环境变量 > 默认值
 """
@@ -49,6 +49,7 @@ class AgentLLMConfig:
     max_tokens: int = 8192
     supports_vision: bool = False
     supports_function_calling: bool = True
+    max_tool_rounds: int = 10
 
 
 @dataclass

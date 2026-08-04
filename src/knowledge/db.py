@@ -1,4 +1,4 @@
-"""知识库数据库操作：CRUD + FTS5 检索"""
+﻿"""知识库数据库操作：CRUD + FTS5 检索"""
 
 import asyncio
 from typing import Optional, List, Dict, Any

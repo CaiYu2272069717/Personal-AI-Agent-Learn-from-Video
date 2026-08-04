@@ -1,7 +1,10 @@
 """M8 AI Agent 框架测试"""
 
 import pytest
+import asyncio
 import json
+import subprocess
+import sys
 from unittest.mock import patch, MagicMock, AsyncMock
 from pathlib import Path
 
@@ -213,3 +216,181 @@ async def test_tool_unknown():
     result = await registry.execute("nonexistent_tool", {})
     data = json.loads(result)
     assert "error" in data
+
+
+@pytest.mark.asyncio
+async def test_python_sandbox_executes_calculation_and_blocks_imports():
+    """代码沙箱可用于计算，但不能导入系统模块。"""
+    from src.agent.tools import ToolRegistry
+
+    registry = ToolRegistry()
+    result = json.loads(await registry.execute("run_python_sandbox", {
+        "code": "values = [1, 2, 3, 4]\nprint(sum(values), math.sqrt(81))",
+    }))
+    assert result["returncode"] == 0
+    assert "10 9.0" in result["stdout"]
+    assert result["sandbox"] == "restricted-python"
+
+    blocked = json.loads(await registry.execute("run_python_sandbox", {
+        "code": "import os\nprint(os.getcwd())",
+    }))
+    assert blocked["returncode"] == 1
+    assert "不允许的语法" in blocked["stderr"]
+
+
+@pytest.mark.asyncio
+async def test_agent_confirmation_is_actually_resolved():
+    """确认接口使用 Future 真正阻塞/放行，而不是显示后自动执行。"""
+    from src.agent.core import AgentCore
+
+    agent = AgentCore()
+    future = asyncio.get_running_loop().create_future()
+    agent._pending_confirmations["call-1"] = future
+    assert agent.resolve_confirmation("call-1", False) is True
+    assert await future is False
+    assert agent.resolve_confirmation("missing", True) is False
+
+
+@pytest.mark.asyncio
+async def test_agent_run_continues_without_a_stream_consumer(tmp_path, monkeypatch):
+    """后台 run 不依赖 SSE 消费者也会执行完成并持久化事件。"""
+    from src import database
+    from src.agent.run_manager import AgentRunManager
+
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "agent-runs.db")
+    await database.init_db()
+
+    class FakeAgent:
+        async def chat(self, message, conversation_id, history, user_message_id=0):
+            yield {"type": "status", "status": "thinking", "label": "正在思考"}
+            await asyncio.sleep(0.03)
+            yield {"type": "text", "content": "后台完成"}
+            yield {"type": "done", "content": "后台完成", "conversation_id": conversation_id}
+
+    async with database.Database() as db:
+        cursor = await db.execute("INSERT INTO conversations (title) VALUES ('test')")
+        await db.commit()
+        conversation_id = cursor.lastrowid
+
+    manager = AgentRunManager(FakeAgent())
+    run_id = await manager.start("hello", conversation_id, [])
+    # 刻意不连接任何 SSE stream。
+    await asyncio.sleep(0.12)
+
+    async with database.Database() as db:
+        cursor = await db.execute("SELECT status FROM agent_runs WHERE id = ?", (run_id,))
+        run = await cursor.fetchone()
+        cursor = await db.execute(
+            "SELECT event_json FROM agent_run_events WHERE run_id = ? ORDER BY id", (run_id,)
+        )
+        events = [json.loads(row[0]) for row in await cursor.fetchall()]
+
+    assert run[0] == "completed"
+    assert [event["type"] for event in events] == ["status", "text", "done"]
+
+
+@pytest.mark.asyncio
+async def test_revert_restores_multiple_turns_and_removes_new_files(tmp_path, monkeypatch):
+    """回退一轮会倒序恢复后续文件快照，并裁剪对应会话消息。"""
+    from src import database
+    from src.agent.tools import ToolRegistry
+    from src.routes.agent_router import RevertRequest, revert
+
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "revert.db")
+    await database.init_db()
+
+    target = tmp_path / "tracked.txt"
+    created = tmp_path / "created.txt"
+    target.write_text("original", encoding="utf-8")
+
+    async with database.Database() as db:
+        cursor = await db.execute("INSERT INTO conversations (title) VALUES ('turn one')")
+        conversation_id = cursor.lastrowid
+        cursor = await db.execute(
+            "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', 'one')",
+            (conversation_id,),
+        )
+        turn_one = cursor.lastrowid
+        await db.execute(
+            "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'assistant', 'done one')",
+            (conversation_id,),
+        )
+        cursor = await db.execute(
+            "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', 'two')",
+            (conversation_id,),
+        )
+        turn_two = cursor.lastrowid
+        await db.execute(
+            "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'assistant', 'done two')",
+            (conversation_id,),
+        )
+        await db.commit()
+
+    registry = ToolRegistry()
+    await registry.execute(
+        "write_file", {"path": str(target), "content": "first"},
+        conversation_id, turn_one,
+    )
+    await registry.execute(
+        "write_file", {"path": str(target), "content": "second"},
+        conversation_id, turn_two,
+    )
+    await registry.execute(
+        "write_file", {"path": str(created), "content": "new"},
+        conversation_id, turn_two,
+    )
+
+    result = await revert(RevertRequest(
+        conversation_id=conversation_id, user_message_id=turn_one,
+    ))
+
+    assert result["status"] == "ok"
+    assert target.read_text(encoding="utf-8") == "original"
+    assert not created.exists()
+    async with database.Database() as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = ?", (conversation_id,)
+        )
+        assert (await cursor.fetchone())[0] == 0
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM snapshots WHERE conversation_id = ?", (conversation_id,)
+        )
+        assert (await cursor.fetchone())[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_run_command_changes_are_captured_for_revert(tmp_path, monkeypatch):
+    """shell 命令造成的未知项目文件改动也会进入当前轮检查点。"""
+    from src import database
+    from src.agent.snapshots import restore_from_turn
+    from src.agent.tools import ToolRegistry
+    from src.config import WORKSPACE_DIR
+
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "command-revert.db")
+    await database.init_db()
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+    target = WORKSPACE_DIR / f"revert-command-{tmp_path.name}.txt"
+    if target.exists():
+        target.unlink()
+
+    async with database.Database() as db:
+        cursor = await db.execute("INSERT INTO conversations (title) VALUES ('command')")
+        conversation_id = cursor.lastrowid
+        cursor = await db.execute(
+            "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', 'run')",
+            (conversation_id,),
+        )
+        user_message_id = cursor.lastrowid
+        await db.commit()
+
+    code = f"from pathlib import Path; Path({str(target)!r}).write_text('created', encoding='utf-8')"
+    command = subprocess.list2cmdline([sys.executable, "-c", code])
+    result = json.loads(await ToolRegistry().execute(
+        "run_command", {"command": command}, conversation_id, user_message_id,
+    ))
+    assert result["returncode"] == 0
+    assert target.read_text(encoding="utf-8") == "created"
+
+    restored = await restore_from_turn(conversation_id, user_message_id)
+    assert restored["removed_files"] >= 1
+    assert not target.exists()

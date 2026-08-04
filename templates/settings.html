@@ -110,6 +110,11 @@
               </div>
             </div>
           </div>
+          <div class="form-group">
+            <label class="form-label">最大工具调用轮数</label>
+            <input type="number" class="form-input" data-path="agent_llm.max_tool_rounds" min="1" max="50">
+            <div class="form-hint">限制单次 Agent 任务连续调用工具的轮数。</div>
+          </div>
         </div>
       </div>
 
@@ -208,6 +213,25 @@
         </div>
       </div>
 
+      <!-- Agent 权限 -->
+      <div class="settings-section settings-permission-section">
+        <div class="settings-section-header">
+          <div class="settings-section-icon" style="background:rgba(181,70,58,.10)">&#x1F6E1;&#xFE0F;</div>
+          <div class="settings-section-title">Agent 权限</div>
+        </div>
+        <div class="settings-section-body">
+          <label class="permission-setting-row">
+            <span>
+              <strong>允许完全访问</strong>
+              <small>开启后，文件写入与命令执行不再逐次确认；永久命令黑名单仍不可绕过。</small>
+            </span>
+            <input type="checkbox" data-path="agent_permission.full_access">
+            <span class="permission-switch" aria-hidden="true"></span>
+          </label>
+          <div class="permission-note">建议仅在你信任当前模型、提示词和工作目录时开启。该设置会与 Agent 输入框旁的快捷开关同步。</div>
+        </div>
+      </div>
+
       <!-- 流水线 -->
       <div class="settings-section">
         <div class="settings-section-header">
@@ -245,7 +269,8 @@ async function loadSettings() {
       let val = data;
       for (const p of parts) val = val?.[p];
       if (val === undefined || val === null) return;
-      el.value = val;
+      if (el.type === 'checkbox') el.checked = Boolean(val);
+      else el.value = val;
     });
   } catch(e) {}
 }
@@ -259,7 +284,9 @@ async function saveSettings() {
     if (!payload[section]) payload[section] = {};
     // 处理嵌套 key (如 ocr.vlm_api_key)
     if (parts.length === 2) {
-      payload[section][parts[1]] = el.type === 'number' ? (parseInt(el.value)||0) : el.value;
+      payload[section][parts[1]] = el.type === 'checkbox'
+        ? el.checked
+        : el.type === 'number' ? (parseInt(el.value)||0) : el.value;
     }
   });
   const resp = await fetch('/api/settings', {

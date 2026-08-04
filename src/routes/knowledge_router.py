@@ -1,4 +1,4 @@
-"""知识库 API 路由"""
+﻿"""知识库 API 路由"""
 
 from fastapi import APIRouter
 from pydantic import BaseModel

@@ -1,4 +1,4 @@
-"""Agent 全局记忆管理：固定区 + 可变区"""
+﻿"""Agent 全局记忆管理：固定区 + 可变区"""
 
 from pathlib import Path
 from ..config import WORKSPACE_DIR

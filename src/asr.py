@@ -1,4 +1,4 @@
-"""ASR 转录模块：OpenAI 兼容接口
+﻿"""ASR 转录模块：OpenAI 兼容接口
 
 支持可配 base_url/key/model，分段并发转录，合并，重试。
 """

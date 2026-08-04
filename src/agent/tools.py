@@ -1,16 +1,20 @@
-"""Agent 工具注册表
+﻿"""Agent 工具注册表
 
 所有 Agent 可调用的工具定义与实现。
 """
 
 import asyncio
 import json
+import os
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable
 from dataclasses import dataclass
 
 from ..config import get_config, WORKDIR, BASE_DIR
+from .snapshots import capture_project_state, record_file_before, record_project_changes
 
 
 @dataclass
@@ -52,7 +56,13 @@ class ToolRegistry:
             })
         return result
 
-    async def execute(self, name: str, arguments: Dict[str, Any]) -> str:
+    async def execute(
+        self,
+        name: str,
+        arguments: Dict[str, Any],
+        conversation_id: int = 0,
+        user_message_id: int = 0,
+    ) -> str:
         """执行工具"""
         tool = self._tools.get(name)
         if not tool:
@@ -61,7 +71,19 @@ class ToolRegistry:
             return json.dumps({"error": f"工具 {name} 无处理函数"}, ensure_ascii=False)
 
         try:
+            # 精确记录文件工具；shell 命令通过项目前后状态差异捕获未知改动。
+            if name in {"write_file", "edit_file"} and arguments.get("path"):
+                await record_file_before(
+                    conversation_id, user_message_id, arguments["path"]
+                )
+            command_state = None
+            if name == "run_command" and conversation_id and user_message_id:
+                command_state = await capture_project_state()
             result = await tool.handler(**arguments)
+            if command_state is not None:
+                await record_project_changes(
+                    conversation_id, user_message_id, command_state
+                )
             if isinstance(result, str):
                 return result
             return json.dumps(result, ensure_ascii=False, default=str)
@@ -243,6 +265,22 @@ class ToolRegistry:
             handler=self._tool_run_command,
         ))
 
+        # --- run_python_sandbox ---
+        self.register(ToolDef(
+            name="run_python_sandbox",
+            description="在受限沙箱中执行 Python 代码，适合计算、文本与 JSON 数据处理；禁止文件、网络、进程和动态导入",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "要执行的 Python 代码"},
+                    "timeout": {"type": "integer", "description": "超时秒数（1-15）", "default": 8},
+                },
+                "required": ["code"],
+            },
+            risk_level="low",
+            handler=self._tool_run_python_sandbox,
+        ))
+
         # --- ocr_image ---
         self.register(ToolDef(
             name="ocr_image",
@@ -385,6 +423,40 @@ class ToolRegistry:
             }, ensure_ascii=False)
         except subprocess.TimeoutExpired:
             return json.dumps({"error": f"命令超时（{timeout}s）"}, ensure_ascii=False)
+        except Exception as e:
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+    async def _tool_run_python_sandbox(self, code: str, timeout: int = 8) -> str:
+        """在独立解释器中运行经过 AST 校验的 Python 代码。"""
+        timeout = max(1, min(int(timeout), 15))
+        runner = Path(__file__).with_name("sandbox_runner.py")
+        env = {
+            key: value for key, value in os.environ.items()
+            if not any(secret in key.upper() for secret in ("KEY", "TOKEN", "PASSWORD", "SECRET"))
+        }
+        env.update({"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"})
+        try:
+            with tempfile.TemporaryDirectory(prefix="lfv-sandbox-") as temp_dir:
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    [sys.executable, "-X", "utf8", "-I", "-S", str(runner)],
+                    input=code,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout,
+                    cwd=temp_dir,
+                    env=env,
+                )
+            return json.dumps({
+                "returncode": result.returncode,
+                "stdout": (result.stdout or "")[-6000:],
+                "stderr": (result.stderr or "")[-2000:],
+                "sandbox": "restricted-python",
+            }, ensure_ascii=False)
+        except subprocess.TimeoutExpired:
+            return json.dumps({"error": f"沙箱执行超时（{timeout}s）"}, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"error": str(e)}, ensure_ascii=False)
 

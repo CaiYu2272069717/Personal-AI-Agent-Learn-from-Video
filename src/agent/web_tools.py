@@ -1,4 +1,4 @@
-"""Agent 联网工具：web_search + web_fetch"""
+﻿"""Agent 联网工具：web_search + web_fetch"""
 
 import json
 from typing import Optional

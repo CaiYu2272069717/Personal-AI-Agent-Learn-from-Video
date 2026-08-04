@@ -1,4 +1,4 @@
-"""Agent 核心：tool-call 循环 + 权限确认 + SSE 流式输出"""
+﻿"""Agent 核心：tool-call 循环 + 权限确认 + SSE 流式输出"""
 
 import json
 import asyncio
@@ -14,7 +14,6 @@ from .memory import load_memory
 from ..database import Database
 
 
-MAX_TOOL_ROUNDS = 10  # 最大工具调用轮数
 MAX_CONTEXT_TOKENS = 6000  # 上下文窗口保留 token 上限（粗估）
 
 
@@ -80,7 +79,15 @@ class AgentCore:
     def __init__(self):
         self.tool_registry = ToolRegistry()
         self.permission_mgr = PermissionManager()
-        self._pending_confirmations: Dict[str, dict] = {}  # call_id -> {tool, args}
+        self._pending_confirmations: Dict[str, asyncio.Future] = {}
+
+    def resolve_confirmation(self, call_id: str, approved: bool) -> bool:
+        """响应一个等待中的工具确认。"""
+        waiter = self._pending_confirmations.get(call_id)
+        if not waiter or waiter.done():
+            return False
+        waiter.set_result(approved)
+        return True
 
     def _get_client(self) -> AsyncOpenAI:
         """获取 Agent LLM 客户端"""
@@ -113,11 +120,12 @@ class AgentCore:
         user_message: str,
         conversation_id: int,
         history: Optional[List[Dict]] = None,
-    ) -> AsyncGenerator[str, None]:
+        user_message_id: int = 0,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """Agent 对话（流式输出）
 
         Yields:
-            SSE 格式的事件字符串
+            可持久化的结构化事件
         """
         config = get_config().agent_llm
         client = self._get_client()
@@ -136,7 +144,10 @@ class AgentCore:
         tools = self.tool_registry.list_tools()
 
         # Tool-call 循环
-        for round_idx in range(MAX_TOOL_ROUNDS):
+        max_rounds = max(1, min(config.max_tool_rounds, 50))
+        complete_text = ""
+        for round_idx in range(max_rounds):
+            yield {"type": "status", "status": "thinking", "label": "正在思考"}
             try:
                 response = await client.chat.completions.create(
                     model=config.model,
@@ -146,7 +157,7 @@ class AgentCore:
                     stream=True,
                 )
             except Exception as e:
-                yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
+                yield {"type": "error", "content": str(e)}
                 return
 
             # 流式处理响应
@@ -161,7 +172,7 @@ class AgentCore:
                 # 文本内容
                 if delta.content:
                     full_content += delta.content
-                    yield f"data: {json.dumps({'type': 'text', 'content': delta.content}, ensure_ascii=False)}\n\n"
+                    yield {"type": "text", "content": delta.content}
 
                 # 工具调用
                 if delta.tool_calls:
@@ -180,10 +191,13 @@ class AgentCore:
             # 检查是否有工具调用
             if not tool_calls_buffer:
                 # 纯文本回复，结束
-                yield f"data: {json.dumps({'type': 'done', 'content': full_content, 'conversation_id': conversation_id}, ensure_ascii=False)}\n\n"
+                complete_text += full_content
                 # 保存消息
-                await self._save_message(conversation_id, "assistant", full_content)
+                await self._save_message(conversation_id, "assistant", complete_text)
+                yield {"type": "done", "content": complete_text, "conversation_id": conversation_id}
                 return
+
+            complete_text += full_content
 
             # 处理工具调用
             messages.append({
@@ -226,17 +240,22 @@ class AgentCore:
             # 处理黑名单拦截
             for entry in blocked_calls:
                 tool_result = json.dumps({"error": entry["reason"]}, ensure_ascii=False)
-                yield f"data: {json.dumps({'type': 'tool_blocked', 'tool': entry['name'], 'reason': entry['reason']}, ensure_ascii=False)}\n\n"
+                yield {"type": "tool_blocked", "tool": entry["name"], "reason": entry["reason"]}
                 messages.append({"role": "tool", "tool_call_id": entry["call_id"], "content": tool_result})
 
             # 并发执行安全工具
             if safe_calls:
                 for entry in safe_calls:
-                    yield f"data: {json.dumps({'type': 'tool_call', 'tool': entry['name'], 'args': entry['args']}, ensure_ascii=False)}\n\n"
+                    yield {"type": "tool_call", "call_id": entry["call_id"], "tool": entry["name"], "args": entry["args"]}
 
                 # 并发执行
                 results = await asyncio.gather(
-                    *[self.tool_registry.execute(e["name"], e["args"]) for e in safe_calls],
+                    *[
+                        self.tool_registry.execute(
+                            e["name"], e["args"], conversation_id, user_message_id
+                        )
+                        for e in safe_calls
+                    ],
                     return_exceptions=True,
                 )
 
@@ -245,19 +264,36 @@ class AgentCore:
                         tool_result = json.dumps({"error": str(result)}, ensure_ascii=False)
                     else:
                         tool_result = result
-                    yield f"data: {json.dumps({'type': 'tool_result', 'tool': entry['name'], 'result': tool_result[:500]}, ensure_ascii=False)}\n\n"
+                    yield {"type": "tool_result", "call_id": entry["call_id"], "tool": entry["name"], "result": tool_result[:2000]}
                     messages.append({"role": "tool", "tool_call_id": entry["call_id"], "content": tool_result})
 
             # 需要确认的工具（顺序执行，等待确认）
             for entry in confirm_calls:
-                yield f"data: {json.dumps({'type': 'confirm_needed', 'call_id': entry['call_id'], 'tool': entry['name'], 'args': entry['args'], 'reason': entry['reason']}, ensure_ascii=False)}\n\n"
-                # 简化：自动批准执行（完整版应等前端 WebSocket 确认）
-                tool_result = await self.tool_registry.execute(entry["name"], entry["args"])
-                yield f"data: {json.dumps({'type': 'tool_result', 'tool': entry['name'], 'result': tool_result[:500]}, ensure_ascii=False)}\n\n"
+                waiter = asyncio.get_running_loop().create_future()
+                self._pending_confirmations[entry["call_id"]] = waiter
+                yield {
+                    "type": "confirm_needed", "call_id": entry["call_id"],
+                    "tool": entry["name"], "args": entry["args"], "reason": entry["reason"],
+                }
+                try:
+                    approved = await waiter
+                finally:
+                    self._pending_confirmations.pop(entry["call_id"], None)
+                if approved:
+                    yield {"type": "tool_call", "call_id": entry["call_id"], "tool": entry["name"], "args": entry["args"]}
+                    tool_result = await self.tool_registry.execute(
+                        entry["name"], entry["args"], conversation_id, user_message_id
+                    )
+                else:
+                    tool_result = json.dumps({"error": "用户拒绝执行此工具"}, ensure_ascii=False)
+                yield {
+                    "type": "tool_result", "call_id": entry["call_id"], "tool": entry["name"],
+                    "result": tool_result[:2000], "rejected": not approved,
+                }
                 messages.append({"role": "tool", "tool_call_id": entry["call_id"], "content": tool_result})
 
         # 超过最大轮数
-        yield f"data: {json.dumps({'type': 'error', 'content': '工具调用轮数超限，请简化请求'}, ensure_ascii=False)}\n\n"
+        yield {"type": "error", "content": "工具调用轮数超限，请简化请求"}
 
     async def _save_message(
         self,

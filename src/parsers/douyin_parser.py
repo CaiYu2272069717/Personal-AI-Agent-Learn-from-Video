@@ -1,4 +1,4 @@
-"""抖音链接解析器：支持 video 与 note（图集）
+﻿"""抖音链接解析器：支持 video 与 note（图集）
 
 移植自 temp/douyin-mcp-server，改造为异步、独立类。
 """

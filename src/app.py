@@ -1,4 +1,4 @@
-"""FastAPI 应用工厂"""
+﻿"""FastAPI 应用工厂"""
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -17,6 +17,9 @@ async def lifespan(app: FastAPI):
     pipeline = get_pipeline()
     worker_task = asyncio.create_task(pipeline.start_worker())
     yield
+    from .routes.agent_router import get_agent
+    from .agent.run_manager import get_run_manager
+    await get_run_manager(get_agent()).shutdown()
     await pipeline.stop()
     worker_task.cancel()
 

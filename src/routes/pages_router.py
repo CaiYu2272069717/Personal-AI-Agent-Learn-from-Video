@@ -1,4 +1,4 @@
-"""页面路由（Jinja2 渲染）"""
+﻿"""页面路由（Jinja2 渲染）"""
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
