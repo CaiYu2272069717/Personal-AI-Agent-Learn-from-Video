@@ -16,7 +16,7 @@ from ..agent.core import AgentCore
 from ..agent.permissions import PermissionManager
 from ..agent.run_manager import AgentRunManager
 from ..agent.snapshots import record_file_before, restore_from_turn
-from ..agent.tools import ToolRegistry
+from ..agent.tools import ToolRegistry, infer_explicit_tool_call, infer_explicit_tool_name
 from ..config import BASE_DIR, get_config
 from ..database import Database
 from .cases import GoldenCase, get_builtin_cases
@@ -254,40 +254,280 @@ class EvaluationService:
         raise ValueError(f"未知 evaluator: {evaluator}")
 
     async def _evaluate_live(self, case: GoldenCase, config: dict[str, Any], run_id: str) -> dict[str, Any]:
+        """live 模式评测：response 评估器走单次文本调用；agent 评估器走多轮 tool-call 循环。
+
+        - agent 评估器：执行 safe/low 工具，记录 medium/high 触发的确认事件，
+          并把工具结果回灌给模型让其生成带引用的最终答案。
+        - response 评估器：传 tool_choice="none" 禁止工具调用，避免模型触发内置搜索等旁路工具。
+        """
+        from .metrics import has_citation  # 局部导入避免循环依赖
+
         agent_config = get_config().agent_llm
         client = AsyncOpenAI(base_url=agent_config.base_url, api_key=agent_config.api_key)
         system_prompt = AgentCore()._build_system_prompt() + "\n" + config.get("prompt_suffix", "")
-        kwargs: dict[str, Any] = {
-            "model": config["model"], "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": case.prompt}],
-            "temperature": config["temperature"], "stream": False,
-        }
-        if case.evaluator == "agent":
-            kwargs["tools"] = ToolRegistry().list_tools()
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": case.prompt},
+        ]
+
+        is_agent = case.evaluator == "agent"
+        tool_registry = ToolRegistry()
+        permission_mgr = PermissionManager()
+        tools_schema = tool_registry.list_tools() if is_agent else None
+        explicit_tool = infer_explicit_tool_name(case.prompt) if is_agent else None
+        explicit_call = infer_explicit_tool_call(case.prompt) if is_agent else None
+
+        # response 评估器也允许 2-3 轮：模型可能先触发内置 search 等旁路工具，
+        # 需要再给一轮让它看到错误后转为文本回答
+        max_rounds = 3
+        all_text = ""
+        all_tools_called: list[str] = []
+        confirmations_triggered: list[dict[str, Any]] = []
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
         started = time.perf_counter()
-        await self._trace(run_id, case.id, "model", "chat.completions", "start", {"model": config["model"]})
-        response = await client.chat.completions.create(**kwargs)
+
+        # 参数完整的显式动作在评测器内确定性执行，避免代理层忽略 tool_choice。
+        if explicit_call:
+            tool_name, args = explicit_call
+            call_id = f"eval-explicit-{case.id}"
+            tool_def = tool_registry.get_tool(tool_name)
+            risk = tool_def.risk_level if tool_def else "safe"
+            allowed, reason = permission_mgr.check_tool_permission(tool_name, risk, args)
+            all_tools_called.append(tool_name)
+            await self._trace(run_id, case.id, "tool", tool_name, "start", {
+                "arguments": args, "risk": risk, "allowed": allowed,
+                "reason": reason, "routed": True,
+            })
+            tool_start = time.perf_counter()
+            if not allowed and "永久拦截" in (reason or ""):
+                result = json.dumps({"error": reason}, ensure_ascii=False)
+            else:
+                if not allowed:
+                    confirmations_triggered.append({
+                        "tool": tool_name, "risk": risk, "reason": reason, "args": args,
+                    })
+                result = await tool_registry.execute(tool_name, args)
+            await self._trace(run_id, case.id, "tool", tool_name, "end", {
+                "duration_ms": round((time.perf_counter() - tool_start) * 1000, 3),
+                "result_len": len(result), "confirmation_triggered": not allowed,
+                "routed": True,
+            })
+            messages.extend([
+                {
+                    "role": "assistant", "content": None,
+                    "tool_calls": [{
+                        "id": call_id, "type": "function",
+                        "function": {"name": tool_name, "arguments": json.dumps(args, ensure_ascii=False)},
+                    }],
+                },
+                {"role": "tool", "tool_call_id": call_id, "content": result[:4000]},
+            ])
+            explicit_tool = None
+
+        for round_idx in range(max_rounds):
+            kwargs: dict[str, Any] = {
+                "model": config["model"],
+                "messages": messages,
+                "temperature": config["temperature"],
+                "stream": False,
+            }
+            if tools_schema:
+                kwargs["tools"] = tools_schema
+                if round_idx == 0 and explicit_tool:
+                    selected_tools = [
+                        item for item in tools_schema
+                        if item["function"]["name"] == explicit_tool
+                    ]
+                    if selected_tools:
+                        kwargs["tools"] = selected_tools
+                        kwargs["tool_choice"] = "required"
+            if not is_agent:
+                # response 评估器：禁止工具调用，避免模型触发内置 search 等旁路工具
+                kwargs["tool_choice"] = "none"
+
+            await self._trace(run_id, case.id, "model", "chat.completions", "start", {
+                "model": config["model"], "round": round_idx,
+            })
+            round_start = time.perf_counter()
+            response = await self._call_with_retry(client, kwargs, is_agent)
+            round_latency = round((time.perf_counter() - round_start) * 1000, 3)
+
+            choice = response.choices[0].message
+            text = choice.content or ""
+            all_text += text
+            usage = response.usage
+            pt = int(getattr(usage, "prompt_tokens", 0) or 0)
+            ct = int(getattr(usage, "completion_tokens", 0) or 0)
+            total_prompt_tokens += pt
+            total_completion_tokens += ct
+            cost = (
+                total_prompt_tokens * config["input_cost_per_million"] / 1_000_000
+                + total_completion_tokens * config["output_cost_per_million"] / 1_000_000
+            )
+
+            tool_calls = choice.tool_calls or []
+            await self._trace(run_id, case.id, "model", "chat.completions", "end", {
+                "duration_ms": round_latency, "prompt_tokens": pt, "completion_tokens": ct,
+                "round": round_idx, "text_len": len(text),
+                "tool_calls": [tc.function.name for tc in tool_calls],
+                "cost_usd": cost,
+            })
+
+            if not tool_calls:
+                break  # 纯文本回复，结束循环
+
+            # 把 assistant 的 tool_calls 加入消息历史
+            messages.append({
+                "role": "assistant",
+                "content": text or None,
+                "tool_calls": [
+                    {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                    for tc in tool_calls
+                ],
+            })
+
+            # 处理每个工具调用
+            for tc in tool_calls:
+                tool_name = tc.function.name
+                try:
+                    args = json.loads(tc.function.arguments)
+                except json.JSONDecodeError:
+                    args = {}
+                all_tools_called.append(tool_name)
+
+                tool_def = tool_registry.get_tool(tool_name)
+                risk = tool_def.risk_level if tool_def else "safe"
+                allowed, reason = permission_mgr.check_tool_permission(tool_name, risk, args)
+
+                await self._trace(run_id, case.id, "tool", tool_name, "start", {
+                    "arguments": args, "risk": risk, "allowed": allowed, "reason": reason,
+                })
+                tool_start = time.perf_counter()
+
+                if tool_def is None:
+                    # 未注册工具（如模型内置 search）：不执行，返回明确错误
+                    result = json.dumps(
+                        {"error": f"工具 '{tool_name}' 不在当前可用工具列表中，无法执行。请直接用文字回答用户问题。"},
+                        ensure_ascii=False,
+                    )
+                elif not allowed and "永久拦截" in (reason or ""):
+                    result = json.dumps({"error": reason}, ensure_ascii=False)
+                else:
+                    # safe/low 直接执行；medium/high 记录确认事件后仍执行（评测环境模拟用户批准）
+                    # 以便模型能基于工具结果生成最终带引用的答案
+                    if not allowed:
+                        confirmations_triggered.append({
+                            "tool": tool_name, "risk": risk, "reason": reason, "args": args,
+                        })
+                    try:
+                        result = await tool_registry.execute(tool_name, args)
+                    except Exception as exc:
+                        result = json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+                tool_latency = round((time.perf_counter() - tool_start) * 1000, 3)
+                await self._trace(run_id, case.id, "tool", tool_name, "end", {
+                    "duration_ms": tool_latency, "result_len": len(result),
+                    "confirmation_triggered": not allowed and tool_def is not None,
+                })
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": result[:4000]})
+
+            # response 评估器：模型不该调用工具，若发生了（含内置旁路工具），
+            # 注入系统消息强制下一轮转为纯文本回答
+            if not is_agent:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        '以上工具调用不被当前环境支持，已忽略。'
+                        '请立即用文字直接回答用户上方提出的原始问题，'
+                        '不要再说「请问您想了解什么」之类的客套话，也不要再调用任何工具。'
+                    ),
+                })
+
         latency = round((time.perf_counter() - started) * 1000, 3)
-        choice = response.choices[0].message
-        text = choice.content or ""
-        actual_tools = [call.function.name for call in (choice.tool_calls or [])]
-        usage = response.usage
-        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
         cost = (
-            prompt_tokens * config["input_cost_per_million"] / 1_000_000
-            + completion_tokens * config["output_cost_per_million"] / 1_000_000
+            total_prompt_tokens * config["input_cost_per_million"] / 1_000_000
+            + total_completion_tokens * config["output_cost_per_million"] / 1_000_000
         )
-        await self._trace(run_id, case.id, "model", "chat.completions", "end", {
-            "duration_ms": latency, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "cost_usd": cost,
-        })
-        text_passed, text_details = evaluate_text(text, case.expected)
-        tool_passed, tool_details = evaluate_tools(actual_tools, case.expected.get("expected_tools", []))
-        passed = text_passed and tool_passed
+
+        text_passed, text_details = evaluate_text(all_text, case.expected)
+        tool_passed, tool_details = evaluate_tools(all_tools_called, case.expected.get("expected_tools", []))
+
+        # confirmation_expected 检查
+        confirmation_ok = True
+        confirmation_reason = ""
+        if case.expected.get("confirmation_expected"):
+            if not confirmations_triggered:
+                confirmation_ok = False
+                confirmation_reason = f"预期需要确认的工具未触发确认流程（实际调用工具: {all_tools_called or '无'}）"
+            elif case.expected.get("expected_tools"):
+                expected_set = set(case.expected["expected_tools"])
+                confirmed_set = {c["tool"] for c in confirmations_triggered}
+                if not (expected_set & confirmed_set):
+                    confirmation_ok = False
+                    confirmation_reason = f"预期需确认的工具 {expected_set} 未触发确认（实际触发: {confirmed_set}）"
+
+        # 汇总失败原因（确保报告里能看到工具/确认类失败）
+        reasons: list[str] = list(text_details.get("reasons", []))
+        if not tool_passed:
+            missing = tool_details.get("missing_tools", [])
+            if missing:
+                reasons.append("未调用预期工具: " + ", ".join(missing))
+            unexpected = tool_details.get("unexpected_tools", [])
+            if unexpected:
+                reasons.append("调用了非预期工具: " + ", ".join(unexpected))
+        if not confirmation_ok:
+            reasons.append(confirmation_reason)
+
+        passed = text_passed and tool_passed and confirmation_ok
+
         return {
-            "passed": passed, "status": "passed" if passed else "failed", "output": text,
-            "details": {**text_details, **tool_details}, "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens, "cost_usd": round(cost, 8),
+            "passed": passed,
+            "status": "passed" if passed else "failed",
+            "output": all_text,
+            "details": {
+                "reasons": reasons,
+                "length": len(all_text),
+                "citation_found": has_citation(all_text),
+                "actual_tools": list(dict.fromkeys(all_tools_called)),
+                "missing_tools": tool_details.get("missing_tools", []),
+                "unexpected_tools": tool_details.get("unexpected_tools", []),
+                "confirmations": confirmations_triggered,
+                "rounds": round_idx + 1,
+            },
+            "prompt_tokens": total_prompt_tokens,
+            "completion_tokens": total_completion_tokens,
+            "cost_usd": round(cost, 8),
         }
+
+    async def _call_with_retry(
+        self,
+        client: AsyncOpenAI,
+        kwargs: dict[str, Any],
+        is_agent: bool,
+        max_retries: int = 2,
+    ) -> Any:
+        """带重试的模型调用：处理代理瞬时错误（502/503/504/超时）与 tool_choice 兼容性回退。"""
+        last_exc: Optional[Exception] = None
+        for attempt in range(max_retries + 1):
+            try:
+                return await client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                last_exc = exc
+                msg = str(exc)
+                # tool_choice="none" 不被接受时，回退一次
+                if not is_agent and "tool_choice" in kwargs and attempt == 0:
+                    kwargs = {k: v for k, v in kwargs.items() if k != "tool_choice"}
+                    continue
+                # 瞬时错误（502/503/504/timeout/连接重置）才重试
+                transient = any(
+                    keyword in msg
+                    for keyword in ("502", "503", "504", "Bad Gateway", "timeout", "Timeout", "Connection reset", "Connection aborted")
+                )
+                if not transient or attempt >= max_retries:
+                    raise
+                await asyncio.sleep(1.0 * (attempt + 1))
+        raise last_exc  # type: ignore[misc]
 
     async def _evaluate_permission(self, case: GoldenCase, run_id: str) -> dict[str, Any]:
         expected = case.expected

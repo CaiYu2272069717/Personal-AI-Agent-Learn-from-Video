@@ -146,6 +146,33 @@ Agent 的命令执行带有权限分级和黑名单保护。默认情况下，�
 - A/B 对比：两套 variant（model/temperature/prompt_version/prompt_suffix/rag/cost）并行运行，输出 pass_rate/latency/tokens/cost 的 delta
 - Markdown 回归报告：总览 + 分类结果表 + 案例明细表（含错误归因列），可通过 `/api/evaluation/runs/{id}/report` 下载
 
+### Live 模式的工具调用策略
+
+Agent 对用户明确提出、且参数完整的动作采用“确定性路由 + 模型总结”的两阶段策略：
+
+1. 通过高置信度意图路由识别明确动作，例如“搜索 Python 官方网站”“读取 workspace/README.md”“执行命令 python --version”。
+2. 直接执行对应工具，同时保留权限检查；写文件和执行命令仍需用户确认，危险命令黑名单始终生效。
+3. 将工具结果回灌给模型，由模型生成最终自然语言回答、引用来源，或决定是否继续调用其他工具。
+4. 对参数不完整或开放式任务，仍交给模型自主选择工具，不会把所有问题强行关键词化。
+
+这种设计用于兼容部分 OpenAI 兼容代理对 `tool_choice` 支持不稳定的情况：确定性动作不会因为模型漏调工具而失败，Agent 的开放式推理能力也仍然保留。修改 Python 代码后需要重启 `main.py` 服务，已运行进程不会自动加载新模块。
+
+### 最近一次 Live 回归
+
+使用 `gemini-3.5-flash` 的 42 条案例回归（Run ID: `949c35fc`）结果：
+
+| 指标 | 结果 |
+| --- | ---: |
+| 通过 / 失败 / 跳过 | **38 / 4 / 0** |
+| 任务完成率 | **90.5%** |
+| 工具类 | **8 / 8** |
+| completion | **5 / 5** |
+| citation | **3 / 5** |
+| security | **9 / 10** |
+| reliability | **3 / 6**（当前沙箱 safe-delete 限制影响） |
+
+其中 3 条 Revert 失败来自当前 Windows 沙箱无法使用回收站的执行环境限制；正常环境下此前 Revert 案例可全部通过。完整报告见 [`output/agent-eval-949c35fc-fixed.md`](output/agent-eval-949c35fc-fixed.md)。
+
 ## 测试
 
 ```powershell

@@ -6,6 +6,7 @@
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,129 @@ from dataclasses import dataclass
 
 from ..config import get_config, WORKDIR, BASE_DIR
 from .snapshots import capture_project_state, record_file_before, record_project_changes
+
+
+def infer_explicit_tool_name(user_message: str) -> Optional[str]:
+    """从用户明确的动作词推断首轮工具。
+
+    只处理高置信度、直接指向单一工具的请求；普通问题返回 None，
+    继续交给模型自主选择，避免把路由器变成僵化的关键词分类器。
+    """
+    text = (user_message or "").strip().lower()
+    if not text:
+        return None
+
+    # 高危/写入动作优先，避免被“读取/查看”类词覆盖。
+    if any(word in text for word in ("写入", "写文件", "创建文件", "新建文件")):
+        return "write_file"
+    if any(word in text for word in ("编辑文件", "修改文件", "替换文件内容")):
+        return "edit_file"
+    if any(word in text for word in ("执行命令", "运行命令", "执行 python", "运行 python", "shell 命令")):
+        return "run_command"
+
+    # 明确的图片识别/沙箱请求。
+    if any(word in text for word in ("ocr", "识别图片", "图片中的文字", "图片文字")) or (
+        "识别" in text and any(ext in text for ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"))
+    ):
+        return "ocr_image"
+    if any(word in text for word in ("python 沙箱", "受限 python", "沙箱中", "用沙箱计算", "沙箱计算")):
+        return "run_python_sandbox"
+
+    # 知识库操作必须优先于通用联网搜索。
+    if any(word in text for word in ("知识库条目", "知识库中搜索", "搜索知识库", "检索知识库", "知识库内容")):
+        if any(word in text for word in ("读取", "获取", "完整内容")) or ("条目" in text and any(char.isdigit() for char in text)):
+            return "get_item"
+        return "search_knowledge"
+
+    # 指定本地文件/目录工具。
+    if (
+        any(word in text for word in ("列出目录", "列出文件夹", "目录内容", "文件夹内容"))
+        or ("列出" in text and "目录" in text)
+    ):
+        return "list_dir"
+    if (
+        any(word in text for word in ("读取文件", "查看文件", "打开文件"))
+        or (any(word in text for word in ("读取", "查看", "打开")) and any(ext in text for ext in (".md", ".txt", ".json", ".py", ".html", ".css", ".js")))
+    ):
+        return "read_file"
+    if (
+        "glob" in text
+        or (any(word in text for word in ("找出", "搜索所有")) and any(word in text for word in ("文件", "markdown", ".md", "*.")))
+    ):
+        return "glob_files"
+
+    # URL 抓取优先于通用搜索；否则明确的“搜索官网”请求路由 web_search。
+    has_url = "http://" in text or "https://" in text
+    if has_url and any(word in text for word in ("抓取", "网页正文", "概括网页", "读取网页", "打开网页")):
+        return "web_fetch"
+    if any(word in text for word in ("联网搜索", "网络搜索", "网上搜索", "实时搜索")) or (
+        "搜索" in text and any(word in text for word in ("官网", "官方网站", "官方站点"))
+    ):
+        return "web_search"
+
+    return None
+
+
+def infer_explicit_tool_call(user_message: str) -> Optional[tuple[str, Dict[str, Any]]]:
+    """解析可确定参数的显式工具请求。
+
+    这是模型 tool_choice 的确定性兜底：仅当用户已经给出足够参数时返回，
+    不猜测缺失参数，也不执行开放式任务。
+    """
+    text = (user_message or "").strip()
+    tool_name = infer_explicit_tool_name(text)
+    if not tool_name:
+        return None
+
+    lower = text.lower()
+    path_match = re.search(
+        r"(?:[a-zA-Z]:[\\/][^\s，。；;]+|(?:workspace|temp|output|library|prompts|static|templates|src|docs)[\\/][^\s，。；;]+)",
+        text,
+    )
+    url_match = re.search(r"https?://[^\s，。；;]+", text)
+
+    if tool_name == "web_search":
+        query = re.sub(r"^(?:请)?(?:联网|网络|网上|实时)?搜索\s*", "", text, flags=re.IGNORECASE)
+        query = re.sub(r"并(?:给出|注明|保留).*$", "", query).strip(" ，。")
+        return tool_name, {"query": query or text}
+    if tool_name == "web_fetch" and url_match:
+        return tool_name, {"url": url_match.group(0)}
+    if tool_name == "search_knowledge":
+        query = re.sub(r"^.*?(?:搜索|检索)", "", text).replace("知识库中", "").replace("知识库", "")
+        query = re.sub(r"[，,].*$", "", query).strip(" ，。")
+        return tool_name, {"query": query or text}
+    if tool_name == "get_item":
+        item_match = re.search(r"条目\s*(?:id\s*[:：#]?\s*)?(\d+)", lower, re.IGNORECASE)
+        if item_match:
+            return tool_name, {"item_id": int(item_match.group(1))}
+    if tool_name == "list_dir":
+        dir_match = re.search(r"列出\s+([^\s，。；;]+)\s*目录", text)
+        if dir_match:
+            return tool_name, {"path": dir_match.group(1)}
+        if path_match:
+            return tool_name, {"path": path_match.group(0).rstrip("。")}
+    if tool_name == "read_file" and path_match:
+        return tool_name, {"path": path_match.group(0).rstrip("。")}
+    if tool_name == "glob_files":
+        root = "workspace" if "workspace" in lower else "."
+        pattern = "*.md" if ("markdown" in lower or "md 文件" in lower) else "*"
+        return tool_name, {"path": root, "pattern": pattern}
+    if tool_name == "run_python_sandbox":
+        range_match = re.search(r"(\d+)\s*到\s*(\d+).*?和", text)
+        if range_match:
+            start, end = map(int, range_match.groups())
+            return tool_name, {"code": f"print(sum(range({start}, {end + 1})))"}
+    if tool_name == "write_file" and path_match:
+        content_match = re.search(r"把\s+(.+?)\s+写入", text)
+        if content_match:
+            return tool_name, {"path": path_match.group(0).rstrip("。"), "content": content_match.group(1).strip()}
+    if tool_name == "run_command":
+        command = re.sub(r"^(?:请)?(?:执行|运行)命令\s*", "", text).strip(" 。")
+        if command:
+            return tool_name, {"command": command}
+    if tool_name == "ocr_image" and path_match:
+        return tool_name, {"path_or_url": path_match.group(0).rstrip("。")}
+    return None
 
 
 @dataclass
@@ -143,7 +267,7 @@ class ToolRegistry:
         # --- web_search ---
         self.register(ToolDef(
             name="web_search",
-            description="联网搜索，返回结果列表（标题+URL+摘要）",
+            description='联网搜索引擎查询（类似 Google/Bing 搜索）。当用户要求「搜索」、「查找」、「查一下」网络信息，或需要实时网络数据、最新资讯时，必须使用此工具。返回结果列表（每条含标题、URL、摘要）。本环境的搜索能力由此工具提供，没有其他内置搜索。',
             parameters={
                 "type": "object",
                 "properties": {

@@ -35,6 +35,50 @@ def test_tool_registry():
     assert tool2.risk_level == "high"
 
 
+def test_explicit_tool_routing():
+    """明确的用户动作应稳定路由到对应工具，普通问答保持模型自主选择。"""
+    from src.agent.tools import infer_explicit_tool_name
+
+    cases = {
+        "在知识库中搜索 Agent，并注明条目标题": "search_knowledge",
+        "读取知识库条目 1 后总结": "get_item",
+        "搜索 Python 官方网站并给出来源 URL": "web_search",
+        "抓取 https://example.com 并概括": "web_fetch",
+        "列出 workspace 目录": "list_dir",
+        "读取 workspace/README.md": "read_file",
+        "找出 workspace 下所有 markdown 文件": "glob_files",
+        "用受限 Python 沙箱计算 1 到 100 的和": "run_python_sandbox",
+        "把 hello 写入 workspace/eval.txt": "write_file",
+        "执行命令 python --version": "run_command",
+        "识别 workspace/sample.png 中的文字": "ocr_image",
+    }
+    for prompt, expected in cases.items():
+        assert infer_explicit_tool_name(prompt) == expected
+
+    assert infer_explicit_tool_name("用一句话解释什么是 RAG。") is None
+
+
+def test_explicit_tool_call_argument_parsing():
+    """参数完整的显式请求应解析为可直接执行的工具调用。"""
+    from src.agent.tools import infer_explicit_tool_call
+
+    assert infer_explicit_tool_call("搜索 Python 官方网站并给出来源 URL。") == (
+        "web_search", {"query": "Python 官方网站"}
+    )
+    assert infer_explicit_tool_call("列出 workspace 目录。") == (
+        "list_dir", {"path": "workspace"}
+    )
+    assert infer_explicit_tool_call("读取 workspace/README.md。") == (
+        "read_file", {"path": "workspace/README.md"}
+    )
+    assert infer_explicit_tool_call("执行命令 python --version。") == (
+        "run_command", {"command": "python --version"}
+    )
+    assert infer_explicit_tool_call("读取知识库条目 1 后总结。") == (
+        "get_item", {"item_id": 1}
+    )
+
+
 def test_permission_safe_tools():
     """测试安全工具权限"""
     from src.agent.permissions import PermissionManager

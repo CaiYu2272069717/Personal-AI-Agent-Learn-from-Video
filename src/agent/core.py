@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from openai import AsyncOpenAI
 
 from ..config import get_config
-from .tools import ToolRegistry
+from .tools import ToolRegistry, infer_explicit_tool_call, infer_explicit_tool_name
 from .permissions import PermissionManager
 from .memory import load_memory
 from ..database import Database
@@ -108,11 +108,22 @@ class AgentCore:
 你可以使用以下工具来完成任务。使用 function calling 来调用工具。
 工具列表已通过 tools 参数提供。
 
+**工具使用须知（重要）**：
+- 联网搜索必须调用 `web_search` 工具，不要假设环境缺少搜索能力，也不要用模型先验知识代替实时搜索
+- 抓取网页正文必须调用 `web_fetch` 工具
+- 知识库检索必须调用 `search_knowledge` 或 `get_item` 工具
+- 当用户要求执行某个动作（写入/编辑/命令）时，应直接调用对应工具，不要仅在文本中描述意图
+
 ## 工作原则
-- 回答基于知识库内容时，标注来源（条目标题/ID）
-- 联网搜索结果须标注来源 URL
+- 回答基于知识库内容时，必须标注来源，格式如：`来源：条目《标题》(ID: N)` 或 `条目 ID: N`
+- 联网搜索结果须标注来源 URL，格式如：`来源：https://...`
+- 抓取网页内容后须在回答中保留来源 URL
 - 不确定就说不知道，不编造
 - 中/高危操作需等待用户确认
+
+## 输出规范
+- 当用户要求"步骤"、"方法"、"流程"、"方案"等多要点内容时，使用数字编号（1. 2. 3.）或"第一/第二/第三"明确组织
+- 回答应充分展开，避免过简；纯文本回答时不要调用任何工具
 """
 
     async def chat(
@@ -142,6 +153,53 @@ class AgentCore:
         messages = _truncate_history(messages, MAX_CONTEXT_TOKENS)
 
         tools = self.tool_registry.list_tools()
+        explicit_tool = infer_explicit_tool_name(user_message)
+        explicit_call = infer_explicit_tool_call(user_message)
+
+        # 对参数完整的显式动作做确定性预执行，再让模型基于结果回答。
+        # 这同时作为 OpenAI 兼容代理忽略 tool_choice 时的兜底。
+        if explicit_call:
+            tool_name, args = explicit_call
+            call_id = f"explicit-{conversation_id}-{user_message_id or 'turn'}"
+            tool_def = self.tool_registry.get_tool(tool_name)
+            risk = tool_def.risk_level if tool_def else "safe"
+            allowed, reason = self.permission_mgr.check_tool_permission(tool_name, risk, args)
+            messages.append({
+                "role": "assistant", "content": None,
+                "tool_calls": [{
+                    "id": call_id, "type": "function",
+                    "function": {"name": tool_name, "arguments": json.dumps(args, ensure_ascii=False)},
+                }],
+            })
+            if not allowed and "永久拦截" in (reason or ""):
+                tool_result = json.dumps({"error": reason}, ensure_ascii=False)
+                yield {"type": "tool_blocked", "tool": tool_name, "reason": reason}
+            else:
+                approved = allowed
+                if not allowed:
+                    waiter = asyncio.get_running_loop().create_future()
+                    self._pending_confirmations[call_id] = waiter
+                    yield {
+                        "type": "confirm_needed", "call_id": call_id,
+                        "tool": tool_name, "args": args, "reason": reason,
+                    }
+                    try:
+                        approved = await waiter
+                    finally:
+                        self._pending_confirmations.pop(call_id, None)
+                if approved:
+                    yield {"type": "tool_call", "call_id": call_id, "tool": tool_name, "args": args}
+                    tool_result = await self.tool_registry.execute(
+                        tool_name, args, conversation_id, user_message_id
+                    )
+                else:
+                    tool_result = json.dumps({"error": "用户拒绝执行此工具"}, ensure_ascii=False)
+                yield {
+                    "type": "tool_result", "call_id": call_id, "tool": tool_name,
+                    "result": tool_result[:2000], "rejected": not approved,
+                }
+            messages.append({"role": "tool", "tool_call_id": call_id, "content": tool_result})
+            explicit_tool = None
 
         # Tool-call 循环
         max_rounds = max(1, min(config.max_tool_rounds, 50))
@@ -149,13 +207,25 @@ class AgentCore:
         for round_idx in range(max_rounds):
             yield {"type": "status", "status": "thinking", "label": "正在思考"}
             try:
-                response = await client.chat.completions.create(
-                    model=config.model,
-                    messages=messages,
-                    tools=tools if tools else None,
-                    temperature=config.temperature,
-                    stream=True,
-                )
+                request_kwargs = {
+                    "model": config.model,
+                    "messages": messages,
+                    "tools": tools if tools else None,
+                    "temperature": config.temperature,
+                    "stream": True,
+                }
+                # 用户明确要求某个动作时，首轮只暴露目标工具并强制调用。
+                # 部分 OpenAI 兼容代理在“全量工具 + 指定函数”模式下会忽略 tool_choice；
+                # 收窄首轮工具集合可稳定兼容这类代理。后续轮次恢复全量工具。
+                if round_idx == 0 and explicit_tool:
+                    selected_tools = [
+                        item for item in tools
+                        if item["function"]["name"] == explicit_tool
+                    ]
+                    if selected_tools:
+                        request_kwargs["tools"] = selected_tools
+                        request_kwargs["tool_choice"] = "required"
+                response = await client.chat.completions.create(**request_kwargs)
             except Exception as e:
                 yield {"type": "error", "content": str(e)}
                 return
