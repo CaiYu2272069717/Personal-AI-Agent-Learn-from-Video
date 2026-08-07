@@ -126,6 +126,86 @@ CREATE TABLE IF NOT EXISTS snapshots (
     FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );
 
+-- Agent Evaluation Golden Cases
+CREATE TABLE IF NOT EXISTS eval_cases (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    category TEXT NOT NULL,
+    prompt TEXT NOT NULL DEFAULT '',
+    evaluator TEXT NOT NULL,
+    expected_json TEXT NOT NULL DEFAULT '{}',
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    description TEXT NOT NULL DEFAULT '',
+    builtin INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_eval_cases_category ON eval_cases(category, id);
+
+-- 一次可重复运行的回归评测
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id TEXT PRIMARY KEY,
+    parent_run_id TEXT,
+    label TEXT NOT NULL DEFAULT 'baseline',
+    mode TEXT NOT NULL DEFAULT 'offline',
+    status TEXT NOT NULL DEFAULT 'queued',
+    model TEXT NOT NULL DEFAULT '',
+    config_json TEXT NOT NULL DEFAULT '{}',
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    total_cases INTEGER NOT NULL DEFAULT 0,
+    passed_cases INTEGER NOT NULL DEFAULT 0,
+    skipped_cases INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_eval_runs_created ON eval_runs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_eval_runs_parent ON eval_runs(parent_run_id, label);
+
+-- 每个 Golden Case 的结果与错误归因
+CREATE TABLE IF NOT EXISTS eval_case_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    case_name TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    passed INTEGER NOT NULL DEFAULT 0,
+    latency_ms REAL NOT NULL DEFAULT 0,
+    output_text TEXT NOT NULL DEFAULT '',
+    details_json TEXT NOT NULL DEFAULT '{}',
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    error_type TEXT NOT NULL DEFAULT '',
+    error_message TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (run_id) REFERENCES eval_runs(id) ON DELETE CASCADE,
+    FOREIGN KEY (case_id) REFERENCES eval_cases(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_eval_results_run ON eval_case_results(run_id, id);
+CREATE INDEX IF NOT EXISTS idx_eval_results_case ON eval_case_results(case_id, created_at DESC);
+
+-- 单步骤模型、工具、守卫与恢复 Trace
+CREATE TABLE IF NOT EXISTS eval_traces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    case_id TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    phase TEXT NOT NULL DEFAULT 'end',
+    duration_ms REAL NOT NULL DEFAULT 0,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    error_type TEXT NOT NULL DEFAULT '',
+    error_message TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (run_id) REFERENCES eval_runs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_eval_traces_run ON eval_traces(run_id, case_id, id);
+
 -- 任务队列
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

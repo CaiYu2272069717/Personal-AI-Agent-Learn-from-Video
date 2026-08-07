@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% set active_page = 'evaluation' %}
+{% block title %}Agent Evaluation Console - Learn From Video{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/evaluation.css">{% endblock %}
+
+{% block body %}
+<main class="main-content eval-console">
+  <div class="eval-frame">
+    <header class="eval-hero">
+      <div>
+        <div class="eval-kicker">SYSTEM / QUALITY LAB / 01</div>
+        <h1>Agent Evaluation<br><em>&amp; Observability</em></h1>
+        <p>把 Agent 的“看起来能用”变成可度量、可定位、可重复回归的工程证据。</p>
+      </div>
+      <div class="eval-actions">
+        <label class="eval-mode">RUN MODE
+          <select id="run-mode"><option value="offline">OFFLINE / 无 API</option><option value="live">LIVE / 真实模型</option></select>
+        </label>
+        <button class="eval-button eval-button-primary" id="run-button" onclick="runSuite()">运行回归套件</button>
+        <button class="eval-button" onclick="openCompare()">A/B 对比</button>
+      </div>
+    </header>
+
+    <section class="eval-strip" id="summary-strip">
+      <article><span>GOLDEN CASES</span><strong id="case-count">—</strong><small>内置基准集</small></article>
+      <article><span>TASK PASS RATE</span><strong id="pass-rate">—</strong><small>本次有效案例</small></article>
+      <article><span>P50 / P95</span><strong id="latency">—</strong><small>毫秒</small></article>
+      <article><span>TOKENS / COST</span><strong id="usage">—</strong><small>USD</small></article>
+    </section>
+
+    <section class="eval-layout">
+      <div class="eval-main-column">
+        <article class="eval-panel eval-matrix-panel">
+          <div class="eval-panel-head">
+            <div><span class="eval-index">A01</span><h2>Quality Matrix</h2></div>
+            <span class="eval-live-dot">REGRESSION READY</span>
+          </div>
+          <div class="eval-matrix" id="category-matrix"><div class="eval-empty">加载 Golden Cases...</div></div>
+        </article>
+
+        <article class="eval-panel">
+          <div class="eval-panel-head">
+            <div><span class="eval-index">A02</span><h2>Case Results</h2></div>
+            <div class="eval-filter"><button class="active" onclick="filterResults('all', this)">ALL</button><button onclick="filterResults('failed', this)">FAIL</button><button onclick="filterResults('passed', this)">PASS</button><button onclick="filterResults('skipped', this)">SKIP</button></div>
+          </div>
+          <div class="eval-table-wrap">
+            <table class="eval-table"><thead><tr><th>CASE</th><th>CATEGORY</th><th>STATUS</th><th>LATENCY</th><th>ATTRIBUTION</th><th>TRACE</th></tr></thead><tbody id="results-body"><tr><td colspan="6" class="eval-empty">运行套件后显示案例结果</td></tr></tbody></table>
+          </div>
+        </article>
+      </div>
+
+      <aside class="eval-side-column">
+        <article class="eval-panel eval-runs-panel">
+          <div class="eval-panel-head"><div><span class="eval-index">B01</span><h2>Runs</h2></div><button class="eval-icon-button" onclick="loadRuns()" title="刷新">↻</button></div>
+          <div id="runs-list" class="eval-run-list"><div class="eval-empty">暂无运行</div></div>
+        </article>
+        <article class="eval-panel eval-trace-panel">
+          <div class="eval-panel-head"><div><span class="eval-index">B02</span><h2>Trace</h2></div><span id="trace-count" class="eval-code">0 STEPS</span></div>
+          <div id="trace-list" class="eval-trace-list"><div class="eval-empty">选择案例查看单步骤 Trace</div></div>
+        </article>
+      </aside>
+    </section>
+
+    <footer class="eval-footer">
+      <div><span id="current-run-id">NO ACTIVE RUN</span><small id="current-model">MODEL —</small></div>
+      <a id="report-link" class="eval-button disabled" href="#">导出 Markdown 报告</a>
+    </footer>
+  </div>
+</main>
+
+<div class="eval-modal" id="compare-modal" aria-hidden="true">
+  <div class="eval-modal-card">
+    <button class="eval-modal-close" onclick="closeCompare()">×</button>
+    <div class="eval-kicker">CONTROLLED EXPERIMENT</div><h2>Baseline / Candidate</h2>
+    <p>可对比模型、Temperature、Prompt 后缀或 RAG 参数。离线模式用于验证对比框架；真实质量差异请使用 LIVE。</p>
+    <div class="eval-compare-grid">
+      <label>BASELINE MODEL<input id="base-model" placeholder="留空使用当前模型"></label>
+      <label>CANDIDATE MODEL<input id="candidate-model" placeholder="候选模型名称"></label>
+      <label>BASELINE TEMP<input id="base-temp" type="number" step="0.1" value="0.7"></label>
+      <label>CANDIDATE TEMP<input id="candidate-temp" type="number" step="0.1" value="0.3"></label>
+      <label>BASELINE PROMPT<textarea id="base-prompt" placeholder="可选系统提示后缀"></textarea></label>
+      <label>CANDIDATE PROMPT<textarea id="candidate-prompt" placeholder="可选系统提示后缀"></textarea></label>
+    </div>
+    <button class="eval-button eval-button-primary" id="compare-button" onclick="runCompare()">开始对比</button>
+    <div id="compare-result" class="eval-compare-result"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}<script src="/static/js/evaluation.js"></script>{% endblock %}

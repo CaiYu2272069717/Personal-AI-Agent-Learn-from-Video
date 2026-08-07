@@ -1,0 +1,94 @@
+:root {
+  --eval-ink: #132039;
+  --eval-paper: #f4efe4;
+  --eval-panel: #fffaf0;
+  --eval-line: #cfc5b4;
+  --eval-red: #d94d2d;
+  --eval-green: #1e7562;
+  --eval-amber: #bd7928;
+  --eval-muted: #716c63;
+}
+
+.eval-console { background: var(--eval-paper); color: var(--eval-ink); min-height: 100vh; }
+.eval-frame { width: min(1500px, 100%); margin: 0 auto; padding: 36px clamp(22px, 4vw, 64px) 28px; }
+.eval-hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 40px; align-items: end; border-bottom: 2px solid var(--eval-ink); padding-bottom: 28px; }
+.eval-kicker, .eval-index, .eval-code, .eval-hero small, .eval-strip span, .eval-table th, .eval-mode { font-family: "Geist Mono", monospace; letter-spacing: .1em; text-transform: uppercase; }
+.eval-kicker { color: var(--eval-red); font-size: 11px; font-weight: 700; margin-bottom: 14px; }
+.eval-hero h1 { font-family: "Noto Serif SC", serif; font-size: clamp(38px, 5vw, 74px); line-height: .92; letter-spacing: -.045em; margin: 0; font-weight: 700; }
+.eval-hero h1 em { color: var(--eval-red); font-style: italic; font-weight: 500; }
+.eval-hero p { max-width: 700px; margin: 22px 0 0; color: var(--eval-muted); font-size: 16px; }
+.eval-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; min-width: 330px; }
+.eval-mode { grid-column: 1 / -1; font-size: 10px; color: var(--eval-muted); }
+.eval-mode select { display: block; width: 100%; margin-top: 7px; border: 1px solid var(--eval-ink); background: transparent; color: var(--eval-ink); padding: 12px; font: 600 12px "Geist Mono", monospace; }
+.eval-button { border: 1px solid var(--eval-ink); background: transparent; color: var(--eval-ink); padding: 12px 16px; font: 700 11px "Geist Mono", monospace; letter-spacing: .06em; text-decoration: none; cursor: pointer; text-align: center; transition: transform .18s, box-shadow .18s, background .18s; }
+.eval-button:hover { transform: translate(-2px, -2px); box-shadow: 3px 3px 0 var(--eval-ink); }
+.eval-button-primary { background: var(--eval-ink); color: var(--eval-panel); }
+.eval-button:disabled, .eval-button.disabled { opacity: .38; pointer-events: none; }
+.eval-strip { display: grid; grid-template-columns: repeat(4, 1fr); border-bottom: 1px solid var(--eval-ink); }
+.eval-strip article { min-height: 124px; padding: 20px 22px; border-right: 1px solid var(--eval-line); display: flex; flex-direction: column; justify-content: space-between; }
+.eval-strip article:last-child { border-right: 0; }
+.eval-strip span { font-size: 10px; color: var(--eval-muted); }
+.eval-strip strong { font: 600 clamp(24px, 3vw, 42px) "Noto Serif SC", serif; }
+.eval-strip small { color: var(--eval-muted); font: 10px "Geist Mono", monospace; }
+.eval-layout { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(300px, .7fr); gap: 18px; padding-top: 18px; }
+.eval-main-column, .eval-side-column { display: grid; gap: 18px; align-content: start; }
+.eval-panel { background: color-mix(in srgb, var(--eval-panel) 88%, transparent); border: 1px solid var(--eval-line); box-shadow: 7px 7px 0 rgba(19, 32, 57, .06); }
+.eval-panel-head { min-height: 62px; padding: 14px 17px; border-bottom: 1px solid var(--eval-line); display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.eval-panel-head > div:first-child { display: flex; align-items: baseline; gap: 10px; }
+.eval-panel h2 { margin: 0; font: 700 19px "Noto Serif SC", serif; }
+.eval-index { color: var(--eval-red); font-size: 9px; }
+.eval-live-dot { font: 700 9px "Geist Mono", monospace; color: var(--eval-green); letter-spacing: .08em; }
+.eval-live-dot::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; background: var(--eval-green); box-shadow: 0 0 0 3px rgba(30, 117, 98, .12); }
+.eval-matrix { display: grid; grid-template-columns: repeat(4, 1fr); }
+.eval-metric { padding: 18px; min-height: 145px; border-right: 1px solid var(--eval-line); border-bottom: 1px solid var(--eval-line); position: relative; }
+.eval-metric:nth-child(4n) { border-right: 0; }
+.eval-metric-label { font: 700 10px "Geist Mono", monospace; color: var(--eval-muted); text-transform: uppercase; }
+.eval-metric-value { display: block; margin-top: 20px; font: 600 30px "Noto Serif SC", serif; }
+.eval-metric-meta { display: block; margin-top: 6px; color: var(--eval-muted); font-size: 11px; }
+.eval-meter { height: 4px; background: #dfd6c6; margin-top: 16px; overflow: hidden; }
+.eval-meter i { display: block; height: 100%; background: var(--eval-red); }
+.eval-filter { display: flex !important; gap: 0 !important; border: 1px solid var(--eval-line); }
+.eval-filter button { border: 0; border-right: 1px solid var(--eval-line); padding: 7px 9px; background: transparent; color: var(--eval-muted); font: 700 9px "Geist Mono", monospace; cursor: pointer; }
+.eval-filter button:last-child { border-right: 0; }
+.eval-filter button.active { background: var(--eval-ink); color: white; }
+.eval-table-wrap { overflow: auto; max-height: 500px; }
+.eval-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.eval-table th { position: sticky; top: 0; z-index: 1; background: var(--eval-paper); color: var(--eval-muted); font-size: 9px; text-align: left; }
+.eval-table th, .eval-table td { padding: 12px 14px; border-bottom: 1px solid var(--eval-line); vertical-align: top; }
+.eval-table tbody tr { cursor: pointer; transition: background .15s; }
+.eval-table tbody tr:hover { background: #f0e8da; }
+.eval-status { display: inline-flex; align-items: center; gap: 6px; font: 700 9px "Geist Mono", monospace; }
+.eval-status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.eval-status.pass { color: var(--eval-green); } .eval-status.fail { color: var(--eval-red); } .eval-status.skip { color: var(--eval-amber); }
+.eval-attribution { max-width: 280px; color: var(--eval-muted); }
+.eval-trace-link { color: var(--eval-red); font: 700 10px "Geist Mono", monospace; }
+.eval-run-list, .eval-trace-list { max-height: 440px; overflow-y: auto; }
+.eval-run { display: grid; grid-template-columns: 14px 1fr auto; gap: 10px; padding: 13px 15px; border-bottom: 1px solid var(--eval-line); cursor: pointer; }
+.eval-run:hover, .eval-run.active { background: #eee5d6; }
+.eval-run-marker { width: 8px; height: 8px; margin-top: 5px; border: 1px solid var(--eval-ink); border-radius: 50%; }
+.eval-run.active .eval-run-marker { background: var(--eval-red); border-color: var(--eval-red); }
+.eval-run strong { display: block; font-size: 12px; } .eval-run small { display: block; margin-top: 3px; color: var(--eval-muted); font: 9px "Geist Mono", monospace; }
+.eval-run-rate { font: 700 13px "Geist Mono", monospace; }
+.eval-icon-button { border: 0; background: transparent; color: var(--eval-ink); font-size: 20px; cursor: pointer; }
+.eval-code { font-size: 9px; color: var(--eval-muted); }
+.eval-trace { padding: 14px 16px 14px 34px; border-bottom: 1px solid var(--eval-line); position: relative; }
+.eval-trace::before { content: ""; position: absolute; left: 15px; top: 20px; width: 7px; height: 7px; border: 1px solid var(--eval-red); transform: rotate(45deg); }
+.eval-trace:not(:last-child)::after { content: ""; position: absolute; left: 18px; top: 29px; bottom: -8px; border-left: 1px dashed var(--eval-line); }
+.eval-trace-head { display: flex; justify-content: space-between; gap: 10px; font: 700 10px "Geist Mono", monospace; }
+.eval-trace p { margin: 7px 0 0; color: var(--eval-muted); font: 10px/1.45 "Geist Mono", monospace; overflow-wrap: anywhere; }
+.eval-empty { padding: 36px 18px !important; color: var(--eval-muted); text-align: center; font: 10px "Geist Mono", monospace; }
+.eval-footer { display: flex; justify-content: space-between; align-items: center; gap: 16px; border-top: 2px solid var(--eval-ink); margin-top: 22px; padding-top: 18px; }
+.eval-footer span, .eval-footer small { display: block; font: 10px "Geist Mono", monospace; } .eval-footer small { margin-top: 5px; color: var(--eval-muted); }
+.eval-modal { position: fixed; inset: 0; z-index: 100; background: rgba(19, 32, 57, .48); display: none; place-items: center; padding: 20px; }
+.eval-modal.active { display: grid; }
+.eval-modal-card { width: min(760px, 100%); max-height: 90vh; overflow: auto; background: var(--eval-panel); border: 1px solid var(--eval-ink); box-shadow: 12px 12px 0 var(--eval-ink); padding: 30px; position: relative; }
+.eval-modal-card h2 { margin: 0; font: 700 34px "Noto Serif SC", serif; } .eval-modal-card > p { color: var(--eval-muted); }
+.eval-modal-close { position: absolute; right: 14px; top: 10px; border: 0; background: transparent; font-size: 28px; cursor: pointer; }
+.eval-compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 24px 0; }
+.eval-compare-grid label { font: 700 9px "Geist Mono", monospace; color: var(--eval-muted); }
+.eval-compare-grid input, .eval-compare-grid textarea { width: 100%; box-sizing: border-box; margin-top: 6px; border: 1px solid var(--eval-line); background: var(--eval-paper); color: var(--eval-ink); padding: 10px; font: 12px "Geist Mono", monospace; }
+.eval-compare-grid textarea { min-height: 80px; resize: vertical; }
+.eval-compare-result { margin-top: 18px; font: 11px/1.7 "Geist Mono", monospace; }
+
+@media (max-width: 1100px) { .eval-layout { grid-template-columns: 1fr; } .eval-side-column { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 760px) { .eval-frame { padding: 70px 14px 20px; } .eval-hero { grid-template-columns: 1fr; } .eval-actions { min-width: 0; } .eval-strip { grid-template-columns: 1fr 1fr; } .eval-strip article:nth-child(2) { border-right: 0; } .eval-matrix { grid-template-columns: 1fr 1fr; } .eval-metric:nth-child(2n) { border-right: 0; } .eval-side-column, .eval-compare-grid { grid-template-columns: 1fr; } }

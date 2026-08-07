@@ -40,6 +40,12 @@ async def tools_page(request: Request):
     return templates.TemplateResponse(request=request, name="tools.html")
 
 
+@router.get("/evaluation", response_class=HTMLResponse)
+async def evaluation_page(request: Request):
+    """Agent 评测与可观测性控制台。"""
+    return templates.TemplateResponse(request=request, name="evaluation.html")
+
+
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     """设置页"""

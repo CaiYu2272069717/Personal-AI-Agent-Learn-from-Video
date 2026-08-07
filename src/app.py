@@ -39,12 +39,21 @@ def create_app() -> FastAPI:
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     # 注册路由
-    from .routes import pipeline_router, knowledge_router, agent_router, settings_router, pages_router, tools_router
+    from .routes import (
+        agent_router,
+        evaluation_router,
+        knowledge_router,
+        pages_router,
+        pipeline_router,
+        settings_router,
+        tools_router,
+    )
     app.include_router(pages_router.router)
     app.include_router(pipeline_router.router, prefix="/api")
     app.include_router(knowledge_router.router, prefix="/api")
     app.include_router(agent_router.router, prefix="/api")
     app.include_router(settings_router.router, prefix="/api")
     app.include_router(tools_router.router, prefix="/api")
+    app.include_router(evaluation_router.router, prefix="/api")
 
     return app

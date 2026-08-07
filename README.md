@@ -13,8 +13,9 @@
 - 可折叠的思考/工具执行过程，切换页面后任务继续并自动恢复进度
 - 联网搜索、网页抓取、文件操作、受控命令执行和受限 Python 代码沙箱
 - 历史会话删除、按轮次回退对话与 Agent 文件改动
-- 默认三级权限确认，并可选“允许完全访问”模式
+- 默认三级权限确认，并可选"允许完全访问"模式
 - 本地知识库、Markdown 归档和响应式 Web 界面
+- **Agent 评测与可观测性控制台**：42 条 Golden Cases、P50/P95 延迟、Token 与成本统计、单步骤 Trace、A/B 对比实验和 Markdown 回归报告
 
 ## 技术栈
 
@@ -115,25 +116,56 @@ Agent 的命令执行带有权限分级和黑名单保护。默认情况下，�
 
 `run_python_sandbox` 使用独立 Python 进程和 AST 白名单，适合计算及文本/JSON 处理，默认禁止文件、网络、进程和动态导入。它是降低风险的受限执行环境，不应被视为操作系统级安全隔离。
 
+## Agent 评测控制台
+
+应用内置 **Agent Evaluation & Observability Console**，从"看起来能用"升级为可度量、可定位、可重复回归的工程证据。在浏览器访问 `/evaluation` 即可使用。
+
+**42 条内置 Golden Cases** 覆盖 7 个维度：
+
+| 维度 | 数量 | 覆盖内容 |
+| --- | ---: | --- |
+| completion | 5 | 任务完成率：直接问答、结构化输出、诚实回答、语言与长度约束 |
+| citation | 5 | 引用正确率：知识库引用、条目读取、联网来源、无依据不伪造 |
+| tool | 8 | 工具调用准确率：search/list/read/glob/sandbox/ocr/write/command |
+| security | 10 | 安全拦截：Prompt 注入、越权读写、危险命令（rm/format/reg）、权限确认、沙箱导入 |
+| reliability | 6 | Revert 与长任务恢复：新建/修改/多轮回退 + 无观察者完成/事件重放/错误归因 |
+| observability | 5 | Trace 覆盖：工具/模型 Trace 完整性、Token/成本聚合、P50/P95 延迟 |
+| comparison | 3 | 对比实验就绪：模型对比、Prompt 版本对比、RAG 参数对比 |
+
+**两种运行模式**：
+
+- `offline`：不调用模型 API，执行权限、沙箱、Revert、恢复、Trace、指标和对比等确定性案例（20 条 live-only 自动跳过），适合 CI/CD 回归。
+- `live`：调用当前或覆盖配置的 OpenAI 兼容模型，评测回答质量与工具选择，输出真实 Token 与成本。
+
+**输出内容**：
+
+- 任务完成率、引用正确率、工具调用准确率
+- P50/P95 延迟、Token（prompt + completion）、成本（USD）
+- 单步骤 Trace：模型调用、工具调用、权限守卫、恢复事件，含 duration/payload/error
+- 错误归因：每个失败案例记录 error_type、error_message 和具体原因
+- A/B 对比：两套 variant（model/temperature/prompt_version/prompt_suffix/rag/cost）并行运行，输出 pass_rate/latency/tokens/cost 的 delta
+- Markdown 回归报告：总览 + 分类结果表 + 案例明细表（含错误归因列），可通过 `/api/evaluation/runs/{id}/report` 下载
+
 ## 测试
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests -q
 ```
 
-当前共 70 个测试，覆盖配置、数据库、链接解析、媒体处理、ASR、总结、知识库、流水线、Agent 后台运行、权限确认、代码沙箱、按轮次 Revert、OCR 和设置接口。
+当前共 74 个测试，覆盖配置、数据库、链接解析、媒体处理、ASR、总结、知识库、流水线、Agent 后台运行、权限确认、代码沙箱、按轮次 Revert、OCR、设置接口，以及评测模块的 Golden Cases 数量与维度、离线套件指标/Trace/报告生成、对比实验 delta 和指标聚合函数。
 
 ## 项目结构
 
 ```text
 src/                 FastAPI 应用与业务逻辑
 src/agent/           Agent、后台运行、文件检查点、沙箱、工具与权限控制
+src/evaluation/      Agent 评测与可观测性（Golden Cases、指标、Trace、对比、报告）
 src/knowledge/       知识库和向量检索
 src/media/           下载与音频处理
 src/parsers/         平台和文章解析器
-src/routes/          Web/API 路由
-templates/           Jinja2 页面模板
-static/              CSS、聊天/提交后台恢复脚本和其他静态资源
+src/routes/          Web/API 路由（含评测 API）
+templates/           Jinja2 页面模板（含评测控制台）
+static/              CSS、聊天/提交/评测脚本和其他静态资源
 prompts/             总结提示词模板
 tests/               自动化测试
 docs/                产品与实现文档
