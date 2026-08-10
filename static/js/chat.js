@@ -1,584 +1,893 @@
-﻿/* chat.js - Agent 后台运行与可恢复交互层。
- * 这是 Agent 聊天页面的唯一 JS 入口，模板中不再包含内联脚本。
+/**
+ * Chat.js — Agent 流式对话前端
+ * 支持 SSE 实时流式、思考过程展开/折叠、工具调用状态、Markdown 渲染
  */
 
-// === 状态 ===
+/* ====== State ====== */
 let conversationId = 0;
+let currentRunId = null;
 let isStreaming = false;
-let pendingConfirm = null;
-let uploadedFiles = [];
-let activeRunId = null;
-let activeEventSource = null;
-let activeTurnEl = null;
-let workspaceSettingsCache = null;
+let currentReader = null;
+let messages = [];  // {role, content}
+let fullAccess = false;
+let welcomeHtmlCache = '';  // 首页 welcome 缓存
 
-// === DOM 引用 ===
-const messagesEl = document.getElementById('chat-messages');
-const inputEl = document.getElementById('chat-input');
-const sendBtn = document.getElementById('send-btn');
-const stopBtn = document.getElementById('stop-btn');
+/* ====== DOM refs ====== */
+const $ = id => document.getElementById(id);
 
-// === marked 初始化 ===
-marked.setOptions({
-  highlight: function(code, lang) {
-    if (lang && hljs.getLanguage(lang)) return hljs.highlight(code, {language: lang}).value;
-    return hljs.highlightAuto(code).value;
-  },
-  breaks: true,
-  gfm: true,
-});
-
-// === 工具标签 ===
-const toolLabels = {
-  search_knowledge: '检索知识库', get_item: '读取知识条目', run_pipeline: '提交内容处理',
-  web_search: '联网搜索', web_fetch: '读取网页', read_file: '读取文件',
-  list_dir: '查看目录', glob_files: '搜索文件', write_file: '写入文件',
-  edit_file: '编辑文件', run_command: '执行命令', run_python_sandbox: '运行代码沙箱',
-  ocr_image: '识别图片文字',
-};
-
-// === 工具函数 ===
-function esc(text) {
-  const d = document.createElement('div');
-  d.textContent = text || '';
-  return d.innerHTML;
-}
-
-function scrollToBottom() {
-  messagesEl.scrollTop = messagesEl.scrollHeight;
-}
-
-function toggleHistory() {
-  document.getElementById('history-panel').classList.toggle('open');
-}
-
-function handleKey(e) {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
-}
-
-// === 输入框自适应高度 ===
-inputEl.addEventListener('input', () => {
-  inputEl.style.height = 'auto';
-  inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
-});
-
-// === 拖拽上传 ===
-const wrapperEl = document.getElementById('chat-input-wrapper');
-if (wrapperEl) {
-  wrapperEl.addEventListener('dragover', e => { e.preventDefault(); wrapperEl.classList.add('dragover'); });
-  wrapperEl.addEventListener('dragleave', e => { e.preventDefault(); wrapperEl.classList.remove('dragover'); });
-  wrapperEl.addEventListener('drop', e => {
-    e.preventDefault();
-    wrapperEl.classList.remove('dragover');
-    const files = Array.from(e.dataTransfer.files);
-    files.forEach(f => {
-      if (f.size > 10 * 1024 * 1024) { appendMessage('system', `文件 ${f.name} 超过 10MB 限制`); return; }
-      uploadedFiles.push(f);
-    });
-    renderFileList();
-  });
-}
-// === 流式状态 ===
-function setStreaming(value) {
-  isStreaming = value;
-  sendBtn.style.display = value ? 'none' : 'flex';
-  stopBtn.style.display = value ? 'flex' : 'none';
-  const badge = document.querySelector('.chat-header-badge');
-  if (badge) badge.textContent = value ? '工作中' : '在线';
-  document.querySelectorAll('.message-revert-btn').forEach(button => {
-    button.disabled = value;
-  });
-}
-
-// === 消息渲染 ===
-function appendMessage(role, content, files, messageId = 0) {
-  const div = document.createElement('div');
-  div.className = `message ${role}`;
-  if (role === 'user') {
-    let filesHtml = '';
-    if (files && files.length) {
-      filesHtml = '<div class="message-files">' + files.map(f => `<span class="message-file-badge">${esc(f.name)}</span>`).join('') + '</div>';
-    }
-    div.innerHTML = `
-      <div class="message-avatar user-avatar">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-      </div>
-      <div class="message-body">
-        <div class="message-role">你</div>
-        ${filesHtml}
-        <div class="message-content">${esc(content)}</div>
-        <div class="message-actions"></div>
-      </div>`;
-  } else if (role === 'assistant') {
-    div.innerHTML = `
-      <div class="message-avatar assistant-avatar">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      </div>
-      <div class="message-body">
-        <div class="message-role">Agent</div>
-        <div class="message-content">${content ? marked.parse(content) : ''}</div>
-      </div>`;
-  } else {
-    div.className = 'message system';
-    div.innerHTML = `<div class="message-system-text">⚠ ${esc(content)}</div>`;
-  }
-  messagesEl.appendChild(div);
-  if (role === 'user' && messageId) setMessageRevert(div, messageId);
-  scrollToBottom();
-  return div;
-}
-
-function setMessageRevert(message, messageId) {
-  if (!message || !messageId) return;
-  message.dataset.messageId = messageId;
-  const actions = message.querySelector('.message-actions');
-  if (!actions) return;
-  actions.innerHTML = `
-    <button class="message-revert-btn" type="button"
-      onclick="revertToMessage(${Number(messageId)}, this)"
-      title="将会话和 Agent 改动的文件恢复到这一轮之前"
-      ${isStreaming ? 'disabled' : ''}>
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 14l-4-4 4-4"/><path d="M5 10h8a6 6 0 1 1 0 12h-3"/></svg>
-      回退到此轮之前
-    </button>`;
-}
-
-async function revertToMessage(messageId, button) {
-  if (!conversationId || isStreaming) return;
-  const confirmed = confirm(
-    '确定回退到这一轮之前吗？\n\n这一轮及之后的对话会被删除，Agent 在这些轮次中创建、编辑或删除的文件会恢复。'
-  );
-  if (!confirmed) return;
-  button.disabled = true;
-  try {
-    const response = await fetch('/api/agent/revert', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({conversation_id: conversationId, user_message_id: messageId}),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || '回退失败');
-    await loadConversation(conversationId, false);
-    appendMessage(
-      'system',
-      `已回退：移除 ${data.removed_messages || 0} 条消息，恢复 ${data.restored_files || 0} 个文件，移除 ${data.removed_files || 0} 个新建文件。`
-    );
-  } catch (error) {
-    button.disabled = false;
-    appendMessage('system', `回退失败: ${error.message}`);
-  }
-}
-
-function renderWelcome() {
-  messagesEl.innerHTML = `
-    <div class="chat-welcome" id="chat-welcome">
-      <div class="chat-welcome-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div>
-      <h2>Learn Video Agent</h2>
-      <p>基于你的知识库回答问题 · 支持联网搜索 · 可执行工具调用</p>
-    </div>`;
-}
-
-// === Agent Turn（思考/执行过程折叠面板） ===
-function appendAgentTurn() {
-  const div = document.createElement('div');
-  div.className = 'message assistant agent-turn';
-  div.innerHTML = `
-    <div class="message-avatar assistant-avatar">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-    </div>
-    <div class="message-body">
-      <div class="message-role">Agent</div>
-      <details class="agent-process" open>
-        <summary><span class="process-pulse"></span><span class="process-summary">正在思考</span><span class="process-chevron">⌄</span></summary>
-        <div class="process-events"><div class="process-event thinking"><span class="process-event-icon"></span><span>正在理解问题并规划下一步</span></div></div>
-      </details>
-      <div class="message-content agent-answer" hidden></div>
-    </div>`;
-  messagesEl.appendChild(div);
-  scrollToBottom();
-  return div;
-}
-
-function processSummary(turn, text, running = true) {
-  if (!turn) return;
-  const summary = turn.querySelector('.process-summary');
-  const pulse = turn.querySelector('.process-pulse');
-  if (summary) summary.textContent = text;
-  if (pulse) pulse.classList.toggle('complete', !running);
-}
-
-function addProcessEvent(turn, data) {
-  if (!turn) return;
-  const events = turn.querySelector('.process-events');
-  if (!events) return;
-  const callId = data.call_id || `${data.type}-${events.children.length}`;
-  let row = events.querySelector(`[data-call-id="${CSS.escape(callId)}"]`);
-
-  if (data.type === 'status') {
-    processSummary(turn, data.label || '正在思考', true);
-    return;
-  }
-  if (data.type === 'confirm_needed') {
-    processSummary(turn, `等待批准：${toolLabels[data.tool] || data.tool}`, true);
-  } else if (data.type === 'tool_call') {
-    processSummary(turn, `正在${toolLabels[data.tool] || data.tool}`, true);
-  }
-
-  if (!row) {
-    row = document.createElement('div');
-    row.className = 'process-event';
-    row.dataset.callId = callId;
-    events.appendChild(row);
-  }
-  const args = data.args ? JSON.stringify(data.args, null, 2) : '';
-  const result = data.result || data.reason || '';
-  if (data.type === 'tool_result') row.classList.add(data.rejected ? 'rejected' : 'done');
-  if (data.type === 'tool_blocked') row.classList.add('blocked');
-  row.innerHTML = `
-    <span class="process-event-icon"></span>
-    <span class="process-event-main">
-      <strong>${esc(toolLabels[data.tool] || data.tool || '执行过程')}</strong>
-      ${data.type === 'confirm_needed' ? '<small>等待你的批准</small>' : ''}
-      ${data.type === 'tool_result' ? `<small>${data.rejected ? '已拒绝' : '执行完成'}</small>` : ''}
-      ${(args || result) ? `<details class="process-detail"><summary>查看详情</summary><pre>${esc(args || result)}</pre></details>` : ''}
-    </span>`;
-}
-
-// === Run 事件处理 ===
-function handleRunEvent(data, turn) {
-  if (data.type === 'text') {
-    const answer = turn.querySelector('.agent-answer');
-    answer.hidden = false;
-    answer.dataset.markdown = (answer.dataset.markdown || '') + data.content;
-    answer.innerHTML = marked.parse(answer.dataset.markdown);
-    processSummary(turn, '正在组织回复', true);
-  } else if (['status', 'tool_call', 'tool_result', 'confirm_needed', 'tool_blocked'].includes(data.type)) {
-    addProcessEvent(turn, data);
-    if (data.type === 'confirm_needed') showConfirmDialog(data);
-  } else if (data.type === 'done') {
-    const answer = turn.querySelector('.agent-answer');
-    if (answer.hidden && data.content) {
-      answer.hidden = false;
-      answer.dataset.markdown = data.content;
-      answer.innerHTML = marked.parse(data.content);
-    }
-    processSummary(turn, '思考与执行过程', false);
-    turn.querySelector('.agent-process')?.removeAttribute('open');
-    finishActiveRun();
-  } else if (data.type === 'cancelled') {
-    processSummary(turn, '任务已停止', false);
-    appendMessage('system', data.content || '已停止生成');
-    finishActiveRun();
-  } else if (data.type === 'error') {
-    processSummary(turn, '任务遇到错误', false);
-    appendMessage('system', data.content || 'Agent 运行失败');
-    finishActiveRun();
-  }
-  scrollToBottom();
-}
-
-function finishActiveRun() {
-  if (activeEventSource) activeEventSource.close();
-  activeEventSource = null;
-  activeRunId = null;
-  activeTurnEl = null;
-  setStreaming(false);
-  loadConversations();
-}
-
-function attachRun(runId, turn, after = 0) {
-  if (activeEventSource) activeEventSource.close();
-  activeRunId = runId;
-  activeTurnEl = turn;
-  setStreaming(true);
-  const source = new EventSource(`/api/agent/runs/${runId}/stream?after=${after}`);
-  activeEventSource = source;
-  source.onmessage = event => {
-    try { handleRunEvent(JSON.parse(event.data), turn); } catch (error) { console.warn(error); }
-  };
-  source.onerror = async () => {
-    try {
-      const response = await fetch(`/api/agent/runs/${runId}`);
-      if (!response.ok) return;
-      const run = await response.json();
-      if (['completed', 'failed', 'cancelled'].includes(run.status)) finishActiveRun();
-    } catch (_) {}
-  };
-}
-
-// === 发送消息（后台 run） ===
-async function sendMessage() {
-  const msg = inputEl.value.trim();
-  if (!msg || isStreaming) return;
-  document.getElementById('chat-welcome')?.remove();
-  let fullMsg = msg;
-  if (uploadedFiles.length) fullMsg = `[附件: ${uploadedFiles.map(f => f.name).join(', ')}]\n${msg}`;
-
-  const userMessage = appendMessage('user', msg, uploadedFiles);
-  inputEl.value = '';
-  inputEl.style.height = 'auto';
-  uploadedFiles = [];
-  document.getElementById('file-list').innerHTML = '';
-  const turn = appendAgentTurn();
-  setStreaming(true);
-
-  try {
-    const response = await fetch('/api/agent/chat', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: fullMsg, conversation_id: conversationId}),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || '提交失败');
-    conversationId = data.conversation_id;
-    setMessageRevert(userMessage, data.user_message_id);
-    localStorage.setItem('lfv.currentConversationId', conversationId);
+/* ====== Init ====== */
+document.addEventListener('DOMContentLoaded', () => {
+    // 缓存 welcome HTML（只在首次加载时保存，后续不会丢失）
+    const welcomeEl = $('chat-welcome');
+    if (welcomeEl) welcomeHtmlCache = welcomeEl.outerHTML;
     loadConversations();
-    attachRun(data.run_id, turn);
-  } catch (error) {
-    turn.remove();
-    appendMessage('system', `连接错误: ${error.message}`);
-    setStreaming(false);
-  }
+    loadFullAccessState();
+    // 工作空间弹窗中的 full-access 开关也绑定同步
+    const wsToggle = $('workspace-full-access');
+    if (wsToggle) {
+        wsToggle.addEventListener('change', function() {
+            setAgentFullAccess(this.checked);
+        });
+    }
+});
+
+function autoResize() {
+    const el = $('chat-input');
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 200) + 'px';
 }
 
-async function stopGeneration() {
-  if (!activeRunId) return;
-  stopBtn.disabled = true;
-  try { await fetch(`/api/agent/runs/${activeRunId}/cancel`, {method: 'POST'}); }
-  finally { stopBtn.disabled = false; }
+/* ====== Slash Command Suggestions ====== */
+let skillsCache = null;
+let selectedSuggestionIdx = -1;
+
+async function loadSkillsCache() {
+    if (skillsCache) return skillsCache;
+    try {
+        const resp = await fetch('/api/extensions/skills');
+        if (resp.ok) {
+            skillsCache = await resp.json();
+        }
+    } catch(e) { console.error(e); }
+    return skillsCache || [];
 }
 
-// === 确认机制 ===
+function handleInput() {
+    autoResize();
+    const ta = $('chat-input');
+    if (ta) handleSlashSuggestion(ta.value);
+}
+
+async function handleSlashSuggestion(value) {
+    const panel = $('skill-suggestions');
+    if (!panel) return;
+    // Only trigger when input starts with '/'
+    if (!value.startsWith('/')) {
+        panel.style.display = 'none';
+        selectedSuggestionIdx = -1;
+        return;
+    }
+    const query = value.slice(1).trim().toLowerCase();
+    const skills = await loadSkillsCache();
+    let filtered = skills;
+    if (query) {
+        filtered = skills.filter(s =>
+            s.name.toLowerCase().includes(query) ||
+            (s.description || '').toLowerCase().includes(query) ||
+            (s.display_name || '').toLowerCase().includes(query)
+        );
+    }
+    if (filtered.length === 0) {
+        panel.style.display = 'none';
+        selectedSuggestionIdx = -1;
+        return;
+    }
+    const items = filtered.slice(0, 8).map((s, i) => `
+        <div class="skill-suggestion-item${i === selectedSuggestionIdx ? ' active' : ''}" data-idx="${i}" data-name="${s.name}">
+            <span class="skill-name">/${s.name}</span>
+            <span class="skill-desc">${s.display_name || s.description || ''}</span>
+            <span class="skill-kbd">Tab</span>
+        </div>
+    `).join('');
+    panel.innerHTML = `<div class="skill-suggestions-header">Skills · 输入过滤 · ↑↓ 选择 · Tab 确认</div>${items}`;
+    panel.style.display = 'block';
+    panel.querySelectorAll('.skill-suggestion-item').forEach(item => {
+        item.onclick = () => selectSkillSuggestion(item.dataset.name);
+    });
+}
+
+function selectSkillSuggestion(name) {
+    const ta = $('chat-input');
+    ta.value = '/' + name + ' ';
+    ta.focus();
+    $('skill-suggestions').style.display = 'none';
+    selectedSuggestionIdx = -1;
+}
+
+function handleSuggestionKeydown(e) {
+    const panel = $('skill-suggestions');
+    if (!panel || panel.style.display === 'none') return false;
+    const items = panel.querySelectorAll('.skill-suggestion-item');
+    if (items.length === 0) return false;
+    if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        selectedSuggestionIdx = (selectedSuggestionIdx + 1) % items.length;
+        updateSuggestionHighlight(items);
+        return true;
+    } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        selectedSuggestionIdx = (selectedSuggestionIdx - 1 + items.length) % items.length;
+        updateSuggestionHighlight(items);
+        return true;
+    } else if (e.key === 'Tab' || (e.key === 'Enter' && selectedSuggestionIdx >= 0)) {
+        e.preventDefault();
+        if (selectedSuggestionIdx >= 0 && selectedSuggestionIdx < items.length) {
+            selectSkillSuggestion(items[selectedSuggestionIdx].dataset.name);
+        } else if (items.length > 0) {
+            selectSkillSuggestion(items[0].dataset.name);
+        }
+        return true;
+    } else if (e.key === 'Escape') {
+        panel.style.display = 'none';
+        selectedSuggestionIdx = -1;
+        return true;
+    }
+    return false;
+}
+
+function updateSuggestionHighlight(items) {
+    items.forEach((item, i) => {
+        item.classList.toggle('active', i === selectedSuggestionIdx);
+    });
+}
+
+/* ====== Send Message ====== */
+function handleKey(e) {
+    // Let suggestion panel handle keys first
+    if (handleSuggestionKeydown(e)) return;
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+    }
+}
+
+async function sendMessage() {
+    const input = $('chat-input');
+    const message = input.value.trim();
+    if (!message || isStreaming) return;
+
+    input.value = '';
+    input.style.height = 'auto';
+    // Close skill suggestions
+    const sugPanel = $('skill-suggestions');
+    if (sugPanel) sugPanel.style.display = 'none';
+
+    // Hide welcome
+    const welcome = $('chat-welcome');
+    if (welcome) welcome.style.display = 'none';
+
+    // Show user message (revert button added after backend confirms)
+    const userMsgEl = appendUserMessage(message);
+    messages.push({ role: 'user', content: message });
+
+    // Use backend run system (persists conversation + messages)
+    startAgentRun(message, userMsgEl);
+}
+
+/* ====== Agent Run System (persistent, event-based) ====== */
+async function startAgentRun(message, userMsgEl) {
+    isStreaming = true;
+    toggleStreamUI(true);
+
+    const msgEl = createAssistantBubble();
+    const thinkingContainer = msgEl.querySelector('.msg-thinking');
+    const thinkingContent = msgEl.querySelector('.msg-thinking-body');
+    const contentEl = msgEl.querySelector('.message-content');
+    const statusEl = msgEl.querySelector('.msg-status');
+
+    let thinkingText = '';
+    let contentText = '';
+
+    try {
+        // Step 1: Create run via backend (persists conversation + user message)
+        const chatResp = await fetch('/api/agent/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                message,
+                conversation_id: conversationId || 0,
+            }),
+        });
+        if (!chatResp.ok) {
+            const err = await chatResp.json().catch(() => ({}));
+            throw new Error(err.detail || `HTTP ${chatResp.status}`);
+        }
+        const runData = await chatResp.json();
+        conversationId = runData.conversation_id;
+        currentRunId = runData.run_id;
+
+        // Add revert button to user message now that we have the ID
+        if (userMsgEl && runData.user_message_id) {
+            const body = userMsgEl.querySelector('.message-body');
+            if (body) {
+                const btn = document.createElement('button');
+                btn.className = 'msg-revert-btn';
+                btn.title = '回退到此轮之前';
+                btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
+                btn.onclick = (e) => { e.stopPropagation(); revertToTurn(runData.user_message_id, btn); };
+                body.appendChild(btn);
+            }
+        }
+
+        // Step 2: Connect to SSE event stream
+        const streamResp = await fetch(`/api/agent/runs/${runData.run_id}/stream`);
+        if (!streamResp.ok) throw new Error(`Stream HTTP ${streamResp.status}`);
+
+        const reader = streamResp.body.getReader();
+        const decoder = new TextDecoder();
+        currentReader = reader;
+        let buffer = '';
+
+        function pump() {
+            reader.read().then(({ done, value }) => {
+                if (done) {
+                    finishStream(contentText, msgEl);
+                    loadConversations();
+                    return;
+                }
+
+                buffer += decoder.decode(value, { stream: true });
+                const { events, remaining } = parseSSE(buffer);
+                buffer = remaining;
+
+                for (const evt of events) {
+                    const data = evt.data || {};
+                    switch (evt.type || data.type) {
+                        case 'thinking':
+                            if (data.content) {
+                                thinkingContainer.style.display = 'block';
+                                thinkingText += data.content;
+                                thinkingContent.textContent = thinkingText;
+                                thinkingContent.scrollTop = thinkingContent.scrollHeight;
+                            }
+                            break;
+
+                        case 'thinking_done':
+                            thinkingContainer.classList.add('collapsed');
+                            break;
+
+                        case 'text':
+                        case 'content':
+                            contentText += (data.content || '');
+                            contentEl.innerHTML = renderMarkdown(contentText);
+                            break;
+
+                        case 'tool_call':
+                            statusEl.style.display = 'block';
+                            statusEl.innerHTML = `<span class="msg-tool-badge">⚡ ${escapeHtml(data.tool || data.content || '工具调用')}</span>`;
+                            break;
+
+                        case 'tool_result':
+                            statusEl.innerHTML = `<span class="msg-tool-badge done">✓ ${escapeHtml(data.tool || data.content || '完成')}</span>`;
+                            break;
+
+                        case 'status':
+                            statusEl.style.display = 'block';
+                            statusEl.innerHTML = `<span class="msg-tool-badge">${escapeHtml(data.label || data.content || '处理中')}</span>`;
+                            break;
+
+                        case 'confirm_needed':
+                            showConfirmDialog(data);
+                            break;
+
+                        case 'done':
+                            if (!contentText && data.content) {
+                                contentText = data.content;
+                                contentEl.innerHTML = renderMarkdown(contentText);
+                            }
+                            finishStream(contentText, msgEl);
+                            loadConversations();
+                            return;
+
+                        case 'error':
+                            contentEl.innerHTML += `<span class="msg-error">❌ ${escapeHtml(data.content || '未知错误')}</span>`;
+                            finishStream(contentText, msgEl);
+                            loadConversations();
+                            return;
+
+                        case 'cancelled':
+                            contentEl.innerHTML += `<span class="msg-error">⏹ ${escapeHtml(data.content || '已停止')}</span>`;
+                            finishStream(contentText, msgEl);
+                            return;
+                    }
+                }
+
+                scrollToBottom();
+                if (isStreaming) pump();
+            }).catch(err => {
+                console.error('Stream read error:', err);
+                contentEl.innerHTML += `<br><span class="msg-error">连接中断: ${err.message}</span>`;
+                finishStream(contentText, msgEl);
+            });
+        }
+
+        pump();
+    } catch (err) {
+        console.error('Agent run error:', err);
+        contentEl.innerHTML = `<span class="msg-error">请求失败: ${escapeHtml(err.message)}</span>`;
+        finishStream('', msgEl);
+    }
+}
+
 function showConfirmDialog(data) {
-  pendingConfirm = data;
-  const body = document.getElementById('confirm-body');
-  body.innerHTML = `
-    <p><strong>${esc(data.tool)}</strong> 需要你的确认</p>
-    <p class="confirm-reason">${esc(data.reason || '')}</p>
-    <pre class="confirm-args">${esc(JSON.stringify(data.args, null, 2))}</pre>`;
-  document.getElementById('chat-confirm').style.display = 'flex';
+    const panel = $('chat-confirm');
+    if (!panel) return;
+    window._pendingCallId = data.call_id || '';
+    const body = $('confirm-body');
+    if (body) {
+        body.innerHTML = `
+            <p><strong>工具请求确认</strong></p>
+            <p>工具: <code>${escapeHtml(data.tool || '')}</code></p>
+            <pre style="max-height:200px;overflow:auto;font-size:12px;background:rgba(0,0,0,.03);padding:8px;border-radius:3px">${escapeHtml(JSON.stringify(data.args || data.arguments || {}, null, 2))}</pre>
+        `;
+    }
+    panel.style.display = 'flex';
 }
 
 async function handleConfirm(approved) {
-  document.getElementById('chat-confirm').style.display = 'none';
-  if (!pendingConfirm) return;
-  const request = pendingConfirm;
-  pendingConfirm = null;
-  try {
-    const response = await fetch('/api/agent/confirm', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({conversation_id: conversationId, call_id: request.call_id, approved}),
-    });
-    if (!response.ok) throw new Error('确认请求已失效');
-  } catch (error) { appendMessage('system', error.message); }
+    const panel = $('chat-confirm');
+    if (panel) panel.style.display = 'none';
+    const callId = window._pendingCallId || '';
+    if (!callId) { console.error('No pending call_id for confirm'); return; }
+    try {
+        const resp = await fetch('/api/agent/confirm', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                conversation_id: conversationId || 0,
+                call_id: callId,
+                approved,
+            }),
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            console.error('confirm failed:', err.detail || resp.statusText);
+        }
+    } catch(e) { console.error('confirm error:', e); }
+    window._pendingCallId = '';
 }
 
-// === 会话管理 ===
+/* ====== SSE Parser ====== */
+function parseSSE(buffer) {
+    const events = [];
+    const blocks = buffer.split('\n\n');
+    let remaining = '';
+
+    for (let i = 0; i < blocks.length; i++) {
+        const block = blocks[i];
+        // Last block might be incomplete
+        if (i === blocks.length - 1 && !buffer.endsWith('\n\n')) {
+            remaining = block;
+            break;
+        }
+        if (!block.trim()) continue;
+
+        let eventType = null;
+        let dataStr = null;
+
+        for (const line of block.split('\n')) {
+            if (line.startsWith('event: ')) {
+                eventType = line.slice(7).trim();
+            } else if (line.startsWith('data: ')) {
+                dataStr = line.slice(6);
+            } else if (line.startsWith('id: ') || line.startsWith(':')) {
+                // id field or comment/heartbeat — skip
+            }
+        }
+
+        if (dataStr !== null) {
+            try {
+                const data = JSON.parse(dataStr);
+                // Type comes from 'event:' line or from inside JSON data
+                const type = eventType || data.type || 'unknown';
+                events.push({ type, data });
+            } catch (e) {
+                // Malformed JSON — skip this block
+            }
+        }
+    }
+
+    return { events, remaining };
+}
+
+/* ====== DOM Helpers ====== */
+function appendUserMessage(text, opts = {}) {
+    const container = $('chat-messages');
+    const div = document.createElement('div');
+    div.className = 'message user';
+    const revertBtn = (opts.canRevert && opts.id)
+        ? `<button class="msg-revert-btn" onclick="event.stopPropagation();revertToTurn(${opts.id}, this)" data-text="${escapeHtml(text)}" title="回退到此轮之前"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg></button>`
+        : '';
+    div.innerHTML = `
+        <div class="message-avatar user-avatar">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        </div>
+        <div class="message-body">
+            <div class="message-content">${escapeHtml(text)}</div>
+            ${revertBtn}
+        </div>
+    `;
+    container.appendChild(div);
+    scrollToBottom();
+    return div;
+}
+
+function createAssistantBubble() {
+    const container = $('chat-messages');
+    const div = document.createElement('div');
+    div.className = 'message assistant';
+    div.innerHTML = `
+        <div class="message-avatar assistant-avatar">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+        </div>
+        <div class="message-body">
+            <div class="msg-thinking" style="display:none">
+                <div class="msg-thinking-header" onclick="this.parentElement.classList.toggle('collapsed')">
+                    <span class="msg-thinking-icon">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 0 1 7-7z"/><line x1="9" y1="21" x2="15" y2="21"/></svg>
+                    </span>
+                    <span class="msg-thinking-label">思考过程</span>
+                    <span class="msg-thinking-toggle">▼</span>
+                </div>
+                <div class="msg-thinking-body"></div>
+            </div>
+            <div class="msg-status" style="display:none"></div>
+            <div class="message-content"><span class="typing-indicator"><span></span><span></span><span></span></span></div>
+        </div>
+    `;
+    container.appendChild(div);
+    scrollToBottom();
+    return div;
+}
+
+function finishStream(text, el) {
+    isStreaming = false;
+    currentReader = null;
+    toggleStreamUI(false);
+
+    // Remove typing indicator if content is empty
+    const contentEl = el.querySelector('.message-content');
+    const indicator = contentEl.querySelector('.typing-indicator');
+    if (indicator) indicator.remove();
+
+    // Hide status after a moment
+    const statusEl = el.querySelector('.msg-status');
+    if (statusEl) setTimeout(() => { statusEl.style.display = 'none'; }, 3000);
+
+    // Save to history
+    if (text) {
+        messages.push({ role: 'assistant', content: text });
+    }
+
+    // Highlight code blocks
+    if (typeof hljs !== 'undefined') {
+        el.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
+    }
+}
+
+function toggleStreamUI(streaming) {
+    const sendBtn = $('send-btn');
+    const stopBtn = $('stop-btn');
+    if (sendBtn) sendBtn.style.display = streaming ? 'none' : 'flex';
+    if (stopBtn) stopBtn.style.display = streaming ? 'flex' : 'none';
+}
+
+async function stopGeneration() {
+    if (currentReader) {
+        currentReader.cancel();
+        currentReader = null;
+    }
+    // Cancel backend run
+    if (currentRunId) {
+        try {
+            await fetch(`/api/agent/runs/${currentRunId}/cancel`, { method: 'POST' });
+        } catch(e) { console.error('cancel error:', e); }
+        currentRunId = null;
+    }
+    isStreaming = false;
+    toggleStreamUI(false);
+}
+
+function scrollToBottom() {
+    const container = $('chat-messages');
+    if (container) container.scrollTop = container.scrollHeight;
+}
+
+/* ====== Markdown Renderer ====== */
+function renderMarkdown(text) {
+    if (!text) return '';
+    // Use marked.js if available
+    if (typeof marked !== 'undefined') {
+        marked.setOptions({
+            highlight: function(code, lang) {
+                if (typeof hljs !== 'undefined' && lang && hljs.getLanguage(lang)) {
+                    return hljs.highlight(code, { language: lang }).value;
+                }
+                return code;
+            },
+            breaks: true
+        });
+        return marked.parse(text);
+    }
+    // Fallback: basic markdown
+    let html = escapeHtml(text);
+    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="language-$1">$2</code></pre>');
+    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    html = html.replace(/\n/g, '<br>');
+    return html;
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+/* ====== History Panel ====== */
+function toggleHistory() {
+    const panel = $('history-panel');
+    if (panel) panel.classList.toggle('open');
+}
+
 async function loadConversations() {
-  try {
-    const resp = await fetch('/api/agent/conversations');
-    const data = await resp.json();
-    renderConversationList(data.conversations || []);
-  } catch (_) {}
+    try {
+        const resp = await fetch('/api/agent/conversations');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const list = $('history-list');
+        if (!list) return;
+        list.innerHTML = '';
+        const convs = data.conversations || [];
+        if (!convs.length) {
+            list.innerHTML = '<div class="history-empty">暂无历史会话</div>';
+            return;
+        }
+        for (const conv of convs) {
+            const item = document.createElement('div');
+            item.className = 'history-item' + (conv.id === conversationId ? ' active' : '');
+            const isRunning = conv.run_status === 'running' || conv.run_status === 'queued';
+            item.innerHTML = `
+                <div class="history-item-copy">
+                    <div class="history-item-title">${isRunning ? '<span class="history-running-dot"></span>' : ''}${escapeHtml(conv.title || '新对话')}</div>
+                </div>
+                <button class="history-delete-btn" onclick="event.stopPropagation();deleteConversation(${conv.id}, this)" title="删除">&times;</button>
+            `;
+            item.onclick = () => loadConversation(conv.id, { closeHistory: true });
+            list.appendChild(item);
+        }
+    } catch(e) { console.error('loadConversations error:', e); }
 }
 
-function renderConversationList(conversations) {
-  const list = document.getElementById('history-list');
-  if (!conversations.length) {
-    list.innerHTML = '<div class="history-empty">暂无历史会话</div>';
-    return;
-  }
-  list.innerHTML = conversations.map(item => {
-    const isActive = item.id === conversationId;
-    const date = item.created_at ? new Date(item.created_at).toLocaleDateString('zh-CN') : '';
-    const statusIcon = item.run_status === 'running' ? '<span class="history-running-dot"></span>' : '';
-    return `<div class="history-item ${isActive ? 'active' : ''}" onclick="loadConversation(${item.id})">
-      <div class="history-item-copy">
-        <div class="history-item-title">${statusIcon}${esc(item.title || '新对话')}</div>
-        <div class="history-item-date">${date}</div>
-      </div>
-      <button class="history-delete-btn" onclick="deleteConversation(event, ${item.id})" title="删除会话" aria-label="删除会话">×</button>
-    </div>`;
-  }).join('');
+async function loadConversation(id, opts = {}) {
+    conversationId = id;
+    messages = [];
+    currentRunId = null;
+    const container = $('chat-messages');
+    container.innerHTML = '';
+
+    try {
+        const resp = await fetch(`/api/agent/conversations/${id}/messages`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        for (const msg of (data.messages || [])) {
+            if (msg.role === 'user') {
+                appendUserMessage(msg.content, { id: msg.id, canRevert: !!msg.can_revert });
+                messages.push({ role: 'user', content: msg.content });
+            } else if (msg.role === 'assistant') {
+                appendAssistantMessage(msg.content);
+                messages.push({ role: 'assistant', content: msg.content });
+            }
+        }
+    } catch(e) { console.error('loadConversation error:', e); }
+
+    // Check for active run and reconnect
+    try {
+        const runResp = await fetch(`/api/agent/conversations/${id}/active-run`);
+        if (runResp.ok) {
+            const runData = await runResp.json();
+            if (runData.run) {
+                currentRunId = runData.run.id;
+                reconnectToRun(runData.run.id);
+            }
+        }
+    } catch(e) { /* no active run */ }
+
+    loadConversations();
+    if (opts.closeHistory) toggleHistory();
 }
 
-async function loadConversation(id, closePanel = true) {
-  if (activeEventSource) activeEventSource.close();
-  activeEventSource = null;
-  activeRunId = null;
-  setStreaming(false);
-  conversationId = id;
-  localStorage.setItem('lfv.currentConversationId', id);
-  messagesEl.innerHTML = '';
-  try {
-    const [messagesResponse, runResponse] = await Promise.all([
-      fetch(`/api/agent/conversations/${id}/messages`),
-      fetch(`/api/agent/conversations/${id}/active-run`),
-    ]);
-    const messagesData = await messagesResponse.json();
-    (messagesData.messages || []).forEach(message => {
-      if (message.role === 'user') {
-        appendMessage('user', message.content, null, message.can_revert ? message.id : 0);
-      }
-      else if (message.role === 'assistant') appendMessage('assistant', message.content);
-    });
-    const runData = await runResponse.json();
-    if (runData.run) attachRun(runData.run.id, appendAgentTurn());
-    else if (!(messagesData.messages || []).length) renderWelcome();
-  } catch (error) {
-    appendMessage('system', `加载会话失败: ${error.message}`);
-  }
-  loadConversations();
-  if (closePanel && document.getElementById('history-panel').classList.contains('open')) toggleHistory();
+async function reconnectToRun(runId) {
+    isStreaming = true;
+    toggleStreamUI(true);
+    const msgEl = createAssistantBubble();
+    const thinkingContainer = msgEl.querySelector('.msg-thinking');
+    const thinkingContent = msgEl.querySelector('.msg-thinking-body');
+    const contentEl = msgEl.querySelector('.message-content');
+    const statusEl = msgEl.querySelector('.msg-status');
+    let thinkingText = '';
+    let contentText = '';
+
+    try {
+        const streamResp = await fetch(`/api/agent/runs/${runId}/stream`);
+        if (!streamResp.ok) { finishStream('', msgEl); return; }
+        const reader = streamResp.body.getReader();
+        const decoder = new TextDecoder();
+        currentReader = reader;
+        let buffer = '';
+
+        function pump() {
+            reader.read().then(({ done, value }) => {
+                if (done) { finishStream(contentText, msgEl); loadConversations(); return; }
+                buffer += decoder.decode(value, { stream: true });
+                const { events, remaining } = parseSSE(buffer);
+                buffer = remaining;
+                for (const evt of events) {
+                    const data = evt.data || {};
+                    switch (evt.type || data.type) {
+                        case 'thinking':
+                            if (data.content) { thinkingContainer.style.display = 'block'; thinkingText += data.content; thinkingContent.textContent = thinkingText; }
+                            break;
+                        case 'thinking_done': thinkingContainer.classList.add('collapsed'); break;
+                        case 'text': case 'content':
+                            contentText += (data.content || ''); contentEl.innerHTML = renderMarkdown(contentText); break;
+                        case 'tool_call': statusEl.style.display = 'block'; statusEl.innerHTML = `<span class="msg-tool-badge">⚡ ${escapeHtml(data.tool || data.content || '工具调用')}</span>`; break;
+                        case 'tool_result': statusEl.innerHTML = `<span class="msg-tool-badge done">✓ ${escapeHtml(data.tool || data.content || '完成')}</span>`; break;
+                        case 'done': if (!contentText && data.content) { contentText = data.content; contentEl.innerHTML = renderMarkdown(contentText); } finishStream(contentText, msgEl); loadConversations(); return;
+                        case 'error': contentEl.innerHTML += `<span class="msg-error">❌ ${escapeHtml(data.content || '')}</span>`; finishStream(contentText, msgEl); return;
+                        case 'cancelled': contentEl.innerHTML += `<span class="msg-error">⏹ ${escapeHtml(data.content || '已停止')}</span>`; finishStream(contentText, msgEl); return;
+                    }
+                }
+                scrollToBottom();
+                if (isStreaming) pump();
+            }).catch(err => { finishStream(contentText, msgEl); });
+        }
+        pump();
+    } catch(e) { finishStream('', msgEl); }
 }
 
-async function deleteConversation(event, id) {
-  event.stopPropagation();
-  if (!confirm('删除这个历史会话？此操作不可撤销。')) return;
-  const response = await fetch(`/api/agent/conversations/${id}`, {method: 'DELETE'});
-  if (!response.ok) return;
-  if (conversationId === id) newConversation(false);
-  loadConversations();
+function appendAssistantMessage(text) {
+    const container = $('chat-messages');
+    const div = document.createElement('div');
+    div.className = 'message assistant';
+    div.innerHTML = `
+        <div class="message-avatar assistant-avatar">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+        </div>
+        <div class="message-body">
+            <div class="message-content">${renderMarkdown(text)}</div>
+        </div>
+    `;
+    container.appendChild(div);
+    if (typeof hljs !== 'undefined') {
+        div.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
+    }
 }
 
-function newConversation(closePanel = true) {
-  if (activeEventSource) activeEventSource.close();
-  activeEventSource = null;
-  activeRunId = null;
-  activeTurnEl = null;
-  conversationId = 0;
-  localStorage.removeItem('lfv.currentConversationId');
-  setStreaming(false);
-  renderWelcome();
-  loadConversations();
-  if (closePanel && document.getElementById('history-panel').classList.contains('open')) toggleHistory();
-  inputEl.focus();
+async function newConversation() {
+    conversationId = 0;
+    currentRunId = null;
+    messages = [];
+    const container = $('chat-messages');
+    container.innerHTML = welcomeHtmlCache || '';
+    loadConversations();
 }
 
-function clearChat() { newConversation(); }
-
-// === 文件上传 ===
-function handleFileUpload(event) {
-  const files = Array.from(event.target.files);
-  files.forEach(f => {
-    if (f.size > 10 * 1024 * 1024) { appendMessage('system', `文件 ${f.name} 超过 10MB 限制`); return; }
-    uploadedFiles.push(f);
-  });
-  renderFileList();
-  event.target.value = '';
+function deleteConversation(id, btn) {
+    // Double-click to delete: first click shows trash icon, second click deletes
+    if (btn && !btn.dataset.armed) {
+        btn.dataset.armed = '1';
+        btn.innerHTML = '🗑';
+        btn.title = '再次点击确认删除';
+        setTimeout(() => {
+            if (btn) { btn.dataset.armed = ''; btn.innerHTML = '&times;'; btn.title = '删除'; }
+        }, 3000);
+        return;
+    }
+    fetch(`/api/agent/conversations/${id}`, { method: 'DELETE' })
+        .then(() => { if (id === conversationId) newConversation(); else loadConversations(); })
+        .catch(e => console.error(e));
 }
 
-function renderFileList() {
-  const el = document.getElementById('file-list');
-  el.innerHTML = uploadedFiles.map((f, i) => `
-    <span class="upload-file-tag">${esc(f.name)}<button onclick="removeFile(${i})">&times;</button></span>
-  `).join('');
+async function revertToTurn(userMessageId, btnEl) {
+    if (!conversationId) return;
+    if (isStreaming) {
+        alert('Agent 正在运行，请先停止后再回退。');
+        return;
+    }
+    // Find the original text from the message
+    const msgBody = btnEl ? btnEl.closest('.message-body') : null;
+    const originalText = msgBody ? msgBody.querySelector('.message-content').textContent : '';
+
+    try {
+        const resp = await fetch('/api/agent/revert', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                conversation_id: conversationId,
+                user_message_id: userMessageId,
+            }),
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            alert('回退失败: ' + (err.detail || resp.statusText));
+            return;
+        }
+        // Reload messages
+        await loadConversation(conversationId);
+        // Fill input with original text for easy re-editing
+        if (originalText) {
+            const input = $('chat-input');
+            if (input) { input.value = originalText; input.focus(); autoResize(); }
+        }
+    } catch(e) {
+        console.error('revert error:', e);
+        alert('回退请求失败: ' + e.message);
+    }
 }
 
-function removeFile(idx) {
-  uploadedFiles.splice(idx, 1);
-  renderFileList();
-}
-
-// === 导出 ===
 function exportChat() {
-  const msgs = messagesEl.querySelectorAll('.message');
-  let text = '';
-  msgs.forEach(m => {
-    const role = m.classList.contains('user') ? '用户' : m.classList.contains('assistant') ? 'Agent' : '系统';
-    const content = m.querySelector('.message-content')?.textContent || m.querySelector('.agent-answer')?.textContent || m.querySelector('.message-system-text')?.textContent || '';
-    if (content.trim()) text += `[${role}]\n${content.trim()}\n\n`;
-  });
-  const blob = new Blob([text], {type: 'text/plain'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `对话_${new Date().toLocaleString('zh-CN').replace(/[/:]/g, '-')}.txt`;
-  a.click();
+    const lines = messages.map(m => `${m.role === 'user' ? '用户' : 'Agent'}: ${m.content}`).join('\n\n');
+    const blob = new Blob([lines], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `chat-${Date.now()}.txt`;
+    a.click();
 }
 
-// === 权限开关 ===
-async function syncPermissionToggle() {
-  try {
-    const settings = await fetch('/api/settings').then(r => r.json());
-    const el = document.getElementById('agent-full-access');
-    if (el) el.checked = Boolean(settings.agent_permission?.full_access);
-  } catch (_) {}
-}
-
-async function setAgentFullAccess(enabled) {
-  const toggle = document.getElementById('agent-full-access');
-  toggle.disabled = true;
-  try {
-    const response = await fetch('/api/settings', {
-      method: 'PUT', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({agent_permission: {full_access: enabled}}),
-    });
-    if (!response.ok) throw new Error('权限设置保存失败');
-  } catch (error) {
-    toggle.checked = !enabled;
-    appendMessage('system', error.message);
-  } finally { toggle.disabled = false; }
-}
-
-// === 工作空间设置弹窗 ===
+/* ====== Workspace Settings ====== */
 async function openWorkspaceSettings() {
-  document.getElementById('workspace-modal').classList.add('active');
-  try {
-    workspaceSettingsCache = await fetch('/api/settings').then(r => r.json());
-    document.getElementById('workspace-dir').value = workspaceSettingsCache.workspace_dir || '';
-    document.getElementById('agent-model').value = workspaceSettingsCache.agent_llm?.model || '';
-    document.getElementById('max-rounds').value = workspaceSettingsCache.agent_llm?.max_tool_rounds || 10;
-    document.getElementById('workspace-full-access').checked = Boolean(workspaceSettingsCache.agent_permission?.full_access);
-  } catch (_) {}
+    $('workspace-modal').style.display = 'flex';
+    // 从设置加载当前值
+    try {
+        const resp = await fetch('/api/settings');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const agentLlm = data.agent_llm || {};
+        const perm = data.agent_permission || {};
+        const modelInput = $('agent-model');
+        const roundsInput = $('max-rounds');
+        const wsAccess = $('workspace-full-access');
+        if (modelInput) modelInput.value = agentLlm.model || '';
+        if (roundsInput) roundsInput.value = agentLlm.max_tool_rounds || 10;
+        if (wsAccess) wsAccess.checked = !!perm.full_access;
+    } catch(e) { console.error('加载工作空间设置失败:', e); }
 }
-
 function closeWorkspaceSettings() {
-  document.getElementById('workspace-modal').classList.remove('active');
+    $('workspace-modal').style.display = 'none';
 }
 
-async function fetchWorkspaceModels(button) {
-  if (!workspaceSettingsCache) return;
-  button.classList.add('loading');
-  button.disabled = true;
-  try {
-    const response = await fetch('/api/settings/models', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        base_url: workspaceSettingsCache.agent_llm.base_url,
-        api_key: workspaceSettingsCache.agent_llm.api_key,
-        section: 'agent_llm',
-      }),
-    });
-    const data = await response.json();
-    if (data.error) throw new Error(data.error);
-    document.getElementById('workspace-agent-models').innerHTML =
-      (data.models || []).map(model => `<option value="${esc(model)}"></option>`).join('');
-    document.getElementById('agent-model').focus();
-    button.classList.add('success');
-    setTimeout(() => button.classList.remove('success'), 1800);
-  } catch (error) { alert(`获取失败: ${error.message}`); }
-  finally { button.classList.remove('loading'); button.disabled = false; }
+async function fetchWorkspaceModels(btn) {
+    btn.disabled = true;
+    try {
+        // 从当前设置获取 agent_llm 的 base_url 和 api_key
+        const settingsResp = await fetch('/api/settings');
+        if (!settingsResp.ok) { btn.disabled = false; return; }
+        const settings = await settingsResp.json();
+        const agentLlm = settings.agent_llm || {};
+        const baseUrl = agentLlm.base_url || '';
+        const apiKey = agentLlm.api_key || '';
+        
+        const resp = await fetch('/api/settings/models', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                base_url: baseUrl,
+                api_key: apiKey,
+                section: 'agent_llm'
+            })
+        });
+        if (!resp.ok) { btn.disabled = false; return; }
+        const data = await resp.json();
+        if (data.error) {
+            console.warn('获取模型列表:', data.error);
+        }
+        const datalist = $('workspace-agent-models');
+        if (datalist) {
+            datalist.innerHTML = (data.models || []).map(m => `<option value="${m}">`).join('');
+        }
+    } catch(e) { console.error(e); }
+    btn.disabled = false;
 }
 
 async function saveWorkspaceSettings() {
-  const payload = {
-    agent_llm: {
-      model: document.getElementById('agent-model').value.trim(),
-      max_tool_rounds: Math.max(1, Math.min(50, parseInt(document.getElementById('max-rounds').value) || 10)),
-    },
-    agent_permission: {full_access: document.getElementById('workspace-full-access').checked},
-  };
-  const response = await fetch('/api/settings', {
-    method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
-  });
-  if (response.ok) {
-    document.getElementById('agent-full-access').checked = payload.agent_permission.full_access;
+    const modelInput = $('agent-model');
+    const roundsInput = $('max-rounds');
+    const wsAccess = $('workspace-full-access');
+    
+    const payload = {};
+    
+    // 保存模型和轮数
+    const agentLlm = {};
+    if (modelInput && modelInput.value) agentLlm.model = modelInput.value;
+    if (roundsInput && roundsInput.value) agentLlm.max_tool_rounds = parseInt(roundsInput.value) || 10;
+    if (Object.keys(agentLlm).length) payload.agent_llm = agentLlm;
+    
+    // 保存完全访问
+    if (wsAccess) {
+        payload.agent_permission = { full_access: wsAccess.checked };
+        fullAccess = wsAccess.checked;
+        const inputToggle = $('agent-full-access');
+        if (inputToggle) inputToggle.checked = wsAccess.checked;
+    }
+    
+    try {
+        const resp = await fetch('/api/settings', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        if (wsAccess && wsAccess.checked && resp.ok) {
+            // 工作空间设置中开启完全访问后，关闭可能存在的确认框
+            const panel = $('chat-confirm');
+            if (panel) panel.style.display = 'none';
+            window._pendingCallId = '';
+        }
+    } catch(e) { console.error('保存设置失败:', e); }
+
     closeWorkspaceSettings();
-  } else alert('保存失败');
 }
 
-// === 初始化 ===
-loadConversations();
-syncPermissionToggle();
-const restoredConversationId = parseInt(localStorage.getItem('lfv.currentConversationId') || '0');
-if (restoredConversationId) loadConversation(restoredConversationId, false);
+/* ====== Full Access Toggle ====== */
+function setAgentFullAccess(checked) {
+    fullAccess = checked;
+    // 同步到设置
+    fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent_permission: { full_access: checked } })
+    }).then(resp => {
+        if (checked && resp.ok) {
+            // 开启完全访问后，后端会自动批准当前待确认的调用；关闭确认框
+            const panel = $('chat-confirm');
+            if (panel) panel.style.display = 'none';
+            window._pendingCallId = '';
+        }
+    }).catch(e => console.error('同步完全访问设置失败:', e));
+    // 同步两个开关
+    const inputToggle = $('agent-full-access');
+    const wsToggle = $('workspace-full-access');
+    if (inputToggle) inputToggle.checked = checked;
+    if (wsToggle) wsToggle.checked = checked;
+}
+
+async function loadFullAccessState() {
+    try {
+        const resp = await fetch('/api/settings');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const fa = data.agent_permission && data.agent_permission.full_access;
+        fullAccess = !!fa;
+        const inputToggle = $('agent-full-access');
+        const wsToggle = $('workspace-full-access');
+        if (inputToggle) inputToggle.checked = fullAccess;
+        if (wsToggle) wsToggle.checked = fullAccess;
+    } catch(e) { /* ignore */ }
+}
+
+/* ====== File Upload (stub) ====== */
+function handleFileUpload(event) {
+    const files = event.target.files;
+    const list = $('file-list');
+    if (!list) return;
+    list.innerHTML = '';
+    for (const f of files) {
+        const tag = document.createElement('span');
+        tag.className = 'file-tag';
+        tag.textContent = f.name;
+        list.appendChild(tag);
+    }
+}
+

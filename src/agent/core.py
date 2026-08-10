@@ -1,6 +1,7 @@
 ﻿"""Agent 核心：tool-call 循环 + 权限确认 + SSE 流式输出"""
 
 import json
+import re
 import asyncio
 from typing import AsyncGenerator, Optional, List, Dict, Any
 from dataclasses import dataclass, field
@@ -12,9 +13,83 @@ from .tools import ToolRegistry, infer_explicit_tool_call, infer_explicit_tool_n
 from .permissions import PermissionManager
 from .memory import load_memory
 from ..database import Database
+from .skill_loader import SkillManager
 
 
 MAX_CONTEXT_TOKENS = 6000  # 上下文窗口保留 token 上限（粗估）
+
+# 某些模型（如 GLM）会调用自己内置的工具名而非用户注册的工具名。
+# 这里做一层映射，将模型内置别名路由到我们已注册的工具。
+_MAP_BUILTIN_TOOLS = {
+    "search": "web_search",         # GLM 内置搜索 → 我们的 web_search
+    "web_browser": "web_fetch",     # 某些模型的浏览器 → web_fetch
+    "code_interpreter": "run_python_sandbox",  # 代码解释器 → 沙箱
+}
+
+
+# 匹配模型输出中的引用标记：
+# 英文方括号: [turn0search0], [turn1search2result0], [turn0source0], [turn1fetch0], [search_result_1], [ref1]
+# 中文方括号: 【turn0search1】【turn1fetch0】【4†source】【0:1†source】
+_CITATION_PATTERN = re.compile(
+    r'\[turn\d+search\d+(?:result\d+)?\]'
+    r'|\[turn\d+source\d+\]'
+    r'|\[turn\d+fetch\d+\]'
+    r'|\[search_result_\d+\]'
+    r'|\[ref\d+\]'
+    r'|\u3010turn\d+search\d+(?:result\d+)?\u3011'
+    r'|\u3010turn\d+source\d+\u3011'
+    r'|\u3010turn\d+fetch\d+\u3011'
+    r'|\u3010[^\u3011]*?\u2020[^\u3011]*?\u3011'
+)
+
+
+def _clean_citations(text: str) -> str:
+    """清除模型输出中的原始引用标记"""
+    if not text:
+        return text
+    return _CITATION_PATTERN.sub('', text)
+
+
+class _StreamCitationFilter:
+    """流式引用标记过滤器
+    
+    处理跨 chunk 的引用标记。缓冲可能不完整的标记，
+    确保完整标记被清除，不完整内容延迟输出。
+    """
+    def __init__(self):
+        self._buffer = ""
+    
+    def feed(self, delta: str) -> str:
+        """输入增量文本，返回可安全输出的清理后文本"""
+        self._buffer += delta
+        
+        # 查找最后一个可能未闭合的 [ 或 【
+        last_bracket = self._buffer.rfind('[')
+        last_cn_bracket = self._buffer.rfind('\u3010')
+        cut_pos = max(last_bracket, last_cn_bracket)
+        
+        if cut_pos >= 0:
+            # 检查该括号是否已闭合
+            after = self._buffer[cut_pos:]
+            if ('[' in after and ']' not in after) or ('\u3010' in after and '\u3011' not in after):
+                # 未闭合 - 保留在缓冲区
+                output = self._buffer[:cut_pos]
+                self._buffer = self._buffer[cut_pos:]
+            else:
+                # 已闭合 - 全部输出
+                output = self._buffer
+                self._buffer = ""
+        else:
+            output = self._buffer
+            self._buffer = ""
+        
+        return _clean_citations(output)
+    
+    def flush(self) -> str:
+        """刷新缓冲区中的剩余内容"""
+        output = _clean_citations(self._buffer)
+        self._buffer = ""
+        return output
 
 
 def _estimate_tokens(text: str) -> int:
@@ -79,15 +154,45 @@ class AgentCore:
     def __init__(self):
         self.tool_registry = ToolRegistry()
         self.permission_mgr = PermissionManager()
+        self._skill_manager = None  # SkillManager 实例
         self._pending_confirmations: Dict[str, asyncio.Future] = {}
+
+    def set_skill_manager(self, skill_manager):
+        """注入 Skill 管理器，用于自动匹配 Skill 上下文"""
+        self._skill_manager = skill_manager
 
     def resolve_confirmation(self, call_id: str, approved: bool) -> bool:
         """响应一个等待中的工具确认。"""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"resolve_confirmation called: call_id={call_id!r}, pending={list(self._pending_confirmations.keys())}")
+
         waiter = self._pending_confirmations.get(call_id)
         if not waiter or waiter.done():
+            # Fallback: if there's exactly one pending confirmation, resolve it
+            # (handles call_id mismatch from models that generate different IDs)
+            active = [(k, w) for k, w in self._pending_confirmations.items() if not w.done()]
+            if len(active) == 1:
+                logger.info(f"call_id mismatch, resolving sole pending: {active[0][0]}")
+                active[0][1].set_result(approved)
+                return True
+            logger.warning(f"confirm failed: call_id={call_id!r} not found in pending")
             return False
         waiter.set_result(approved)
         return True
+
+    def auto_approve_all_pending(self):
+        """当用户开启完全访问时，自动批准所有待确认的工具请求。"""
+        import logging
+        logger = logging.getLogger(__name__)
+        active = [(k, w) for k, w in self._pending_confirmations.items() if not w.done()]
+        if active:
+            logger.info(f"full access enabled, auto-approving {len(active)} pending confirmations")
+        for call_id, waiter in active:
+            try:
+                waiter.set_result(True)
+            except Exception:
+                pass
 
     def _get_client(self) -> AsyncOpenAI:
         """获取 Agent LLM 客户端"""
@@ -97,10 +202,46 @@ class AgentCore:
             api_key=config.api_key,
         )
 
-    def _build_system_prompt(self) -> str:
-        """构建系统提示词（含记忆注入）"""
+    def _parse_slash_command(self, user_message: str) -> tuple:
+        """解析 /skill-name 斜杠命令前缀
+        
+        Returns:
+            (skill_name_or_none, actual_message)
+        """
+        import re
+        match = re.match(r"^/([a-zA-Z0-9_-]+)\s*(.*)", user_message, re.DOTALL)
+        if match and self._skill_manager:
+            skill_name = match.group(1)
+            skill = self._skill_manager.get_skill(skill_name)
+            if skill:
+                return skill_name, match.group(2).strip() or user_message
+        return None, user_message
+
+    def _build_system_prompt(self, user_message: str = "") -> str:
+        """构建系统提示词（含记忆注入 + 自动匹配 Skill 上下文）"""
         memory = load_memory()
-        return f"""{memory}
+
+        # 自动匹配 Skill 并注入指令
+        skill_context = ""
+        if self._skill_manager and user_message:
+            # 优先识别 /skill-name 斜杠命令
+            slash_skill, _ = self._parse_slash_command(user_message)
+            if slash_skill:
+                skill = self._skill_manager.get_skill(slash_skill)
+                if skill:
+                    skill_context = self._skill_manager.build_skill_context([skill])
+            else:
+                matched = self._skill_manager.match_skills(user_message)
+                if matched:
+                    skill_context = self._skill_manager.build_skill_context(matched)
+
+        permission_note = (
+            "用户已开启「允许完全访问」，中/高危工具可直接调用，无需再次确认。"
+            if get_config().agent_permission.full_access
+            else "中/高危操作需等待用户确认。"
+        )
+
+        return f"""{memory}{skill_context}
 
 ---
 
@@ -108,7 +249,7 @@ class AgentCore:
 你可以使用以下工具来完成任务。使用 function calling 来调用工具。
 工具列表已通过 tools 参数提供。
 
-**工具使用须知（重要）**：
+**工具使用须知（重要）**:
 - 联网搜索必须调用 `web_search` 工具，不要假设环境缺少搜索能力，也不要用模型先验知识代替实时搜索
 - 抓取网页正文必须调用 `web_fetch` 工具
 - 知识库检索必须调用 `search_knowledge` 或 `get_item` 工具
@@ -119,7 +260,7 @@ class AgentCore:
 - 联网搜索结果须标注来源 URL，格式如：`来源：https://...`
 - 抓取网页内容后须在回答中保留来源 URL
 - 不确定就说不知道，不编造
-- 中/高危操作需等待用户确认
+- {permission_note}
 
 ## 输出规范
 - 当用户要求"步骤"、"方法"、"流程"、"方案"等多要点内容时，使用数字编号（1. 2. 3.）或"第一/第二/第三"明确组织
@@ -141,13 +282,16 @@ class AgentCore:
         config = get_config().agent_llm
         client = self._get_client()
 
-        # 构建消息历史
-        messages = [{"role": "system", "content": self._build_system_prompt()}]
+        # 解析 /skill-name 前缀，将实际消息（去掉前缀）发给模型
+        _, actual_message = self._parse_slash_command(user_message)
+
+        # 构建消息历史（含 Skill 上下文注入）
+        messages = [{"role": "system", "content": self._build_system_prompt(user_message)}]
 
         if history:
             messages.extend(history)
 
-        messages.append({"role": "user", "content": user_message})
+        messages.append({"role": "user", "content": actual_message})
 
         # 上下文窗口管理：截断过长历史
         messages = _truncate_history(messages, MAX_CONTEXT_TOKENS)
@@ -176,6 +320,7 @@ class AgentCore:
                 yield {"type": "tool_blocked", "tool": tool_name, "reason": reason}
             else:
                 approved = allowed
+                confirm_timeout = False
                 if not allowed:
                     waiter = asyncio.get_running_loop().create_future()
                     self._pending_confirmations[call_id] = waiter
@@ -184,7 +329,10 @@ class AgentCore:
                         "tool": tool_name, "args": args, "reason": reason,
                     }
                     try:
-                        approved = await waiter
+                        approved = await asyncio.wait_for(waiter, timeout=300)
+                    except asyncio.TimeoutError:
+                        approved = False
+                        confirm_timeout = True
                     finally:
                         self._pending_confirmations.pop(call_id, None)
                 if approved:
@@ -192,6 +340,8 @@ class AgentCore:
                     tool_result = await self.tool_registry.execute(
                         tool_name, args, conversation_id, user_message_id
                     )
+                elif confirm_timeout:
+                    tool_result = json.dumps({"error": "操作确认超时（5 分钟未收到回应），已取消"}, ensure_ascii=False)
                 else:
                     tool_result = json.dumps({"error": "用户拒绝执行此工具"}, ensure_ascii=False)
                 yield {
@@ -202,7 +352,7 @@ class AgentCore:
             explicit_tool = None
 
         # Tool-call 循环
-        max_rounds = max(1, min(config.max_tool_rounds, 50))
+        max_rounds = max(1, min(config.max_tool_rounds or 10, 50))
         complete_text = ""
         for round_idx in range(max_rounds):
             yield {"type": "status", "status": "thinking", "label": "正在思考"}
@@ -232,22 +382,41 @@ class AgentCore:
 
             # 流式处理响应
             full_content = ""
+            thinking_content = ""
+            in_thinking = False
             tool_calls_buffer = []
+            citation_filter = _StreamCitationFilter()
 
             async for chunk in response:
                 delta = chunk.choices[0].delta if chunk.choices else None
                 if not delta:
                     continue
 
+                # 思考/推理内容（部分模型如 deepseek/glm 通过 reasoning_content 字段返回）
+                reasoning_text = getattr(delta, 'reasoning_content', None) or getattr(delta, 'thinking', None)
+                if reasoning_text:
+                    if not in_thinking:
+                        in_thinking = True
+                        yield {"type": "thinking", "content": ""}
+                    thinking_content += reasoning_text
+                    yield {"type": "thinking", "content": reasoning_text}
+
                 # 文本内容
                 if delta.content:
-                    full_content += delta.content
-                    yield {"type": "text", "content": delta.content}
+                    # 如果之前在思考状态，先发送 thinking_done
+                    if in_thinking:
+                        in_thinking = False
+                        yield {"type": "thinking_done", "content": ""}
+                    # 通过流式过滤器清除引用标记（处理跨 chunk 的情况）
+                    cleaned = citation_filter.feed(delta.content)
+                    if cleaned:
+                        full_content += cleaned
+                        yield {"type": "text", "content": cleaned}
 
                 # 工具调用
                 if delta.tool_calls:
                     for tc in delta.tool_calls:
-                        idx = tc.index
+                        idx = tc.index if tc.index is not None else 0
                         while len(tool_calls_buffer) <= idx:
                             tool_calls_buffer.append({"id": "", "function": {"name": "", "arguments": ""}})
                         if tc.id:
@@ -257,6 +426,21 @@ class AgentCore:
                                 tool_calls_buffer[idx]["function"]["name"] = tc.function.name
                             if tc.function.arguments:
                                 tool_calls_buffer[idx]["function"]["arguments"] += tc.function.arguments
+
+            # 刷新 citation filter 缓冲区中的剩余内容
+            remaining = citation_filter.flush()
+            if remaining:
+                full_content += remaining
+                yield {"type": "text", "content": remaining}
+
+            # 思考结束但没有正文内容的情况
+            if in_thinking:
+                yield {"type": "thinking_done", "content": ""}
+
+            # Ensure every tool call has a valid id (Gemini may not provide one)
+            for i, tc in enumerate(tool_calls_buffer):
+                if not tc["id"]:
+                    tc["id"] = f"call_{conversation_id}_{round_idx}_{i}"
 
             # 检查是否有工具调用
             if not tool_calls_buffer:
@@ -287,6 +471,11 @@ class AgentCore:
             for tc in tool_calls_buffer:
                 call_id = tc["id"]
                 func_name = tc["function"]["name"]
+
+                # 模型内置工具别名映射（如 GLM 的 search → web_search）
+                func_name = _MAP_BUILTIN_TOOLS.get(func_name, func_name)
+                tc["function"]["name"] = func_name
+
                 try:
                     args = json.loads(tc["function"]["arguments"])
                 except json.JSONDecodeError:
@@ -345,8 +534,12 @@ class AgentCore:
                     "type": "confirm_needed", "call_id": entry["call_id"],
                     "tool": entry["name"], "args": entry["args"], "reason": entry["reason"],
                 }
+                confirm_timeout = False
                 try:
-                    approved = await waiter
+                    approved = await asyncio.wait_for(waiter, timeout=300)
+                except asyncio.TimeoutError:
+                    approved = False
+                    confirm_timeout = True
                 finally:
                     self._pending_confirmations.pop(entry["call_id"], None)
                 if approved:
@@ -354,6 +547,8 @@ class AgentCore:
                     tool_result = await self.tool_registry.execute(
                         entry["name"], entry["args"], conversation_id, user_message_id
                     )
+                elif confirm_timeout:
+                    tool_result = json.dumps({"error": "操作确认超时（5 分钟未收到回应），已取消"}, ensure_ascii=False)
                 else:
                     tool_result = json.dumps({"error": "用户拒绝执行此工具"}, ensure_ascii=False)
                 yield {
@@ -372,7 +567,9 @@ class AgentCore:
         content: str,
         tool_calls_json: str = "",
     ):
-        """保存消息到数据库"""
+        """保存消息到数据库（直接流模式 conversation_id=0 时跳过）"""
+        if not conversation_id:
+            return
         async with Database() as db:
             await db.execute(
                 "INSERT INTO messages (conversation_id, role, content, tool_calls_json) VALUES (?, ?, ?, ?)",

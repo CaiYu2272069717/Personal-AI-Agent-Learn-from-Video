@@ -296,6 +296,23 @@ async def test_agent_confirmation_is_actually_resolved():
 
 
 @pytest.mark.asyncio
+async def test_agent_auto_approve_pending_when_full_access_enabled():
+    """开启完全访问后，待确认的工具请求应被自动批准。"""
+    from src.agent.core import AgentCore
+
+    agent = AgentCore()
+    f1 = asyncio.get_running_loop().create_future()
+    f2 = asyncio.get_running_loop().create_future()
+    agent._pending_confirmations["call-1"] = f1
+    agent._pending_confirmations["call-2"] = f2
+
+    agent.auto_approve_all_pending()
+
+    assert await f1 is True
+    assert await f2 is True
+
+
+@pytest.mark.asyncio
 async def test_agent_run_continues_without_a_stream_consumer(tmp_path, monkeypatch):
     """后台 run 不依赖 SSE 消费者也会执行完成并持久化事件。"""
     from src import database

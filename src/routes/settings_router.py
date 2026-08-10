@@ -99,6 +99,13 @@ async def update_settings(payload: dict):
     """更新配置"""
     config = get_config()
     current = asdict(config)
+
+    # 检测完全访问开关是否由关变开
+    old_full_access = current.get("agent_permission", {}).get("full_access", False)
+    new_full_access = old_full_access
+    if isinstance(payload.get("agent_permission"), dict):
+        new_full_access = payload["agent_permission"].get("full_access", old_full_access)
+
     # 深度合并
     for section, values in payload.items():
         if isinstance(values, dict) and section in current:
@@ -127,4 +134,10 @@ async def update_settings(payload: dict):
     )
     save_config(new_config)
     reload_config()
+
+    # 若用户刚刚开启完全访问，自动批准当前所有待确认的工具请求
+    if not old_full_access and new_full_access:
+        from .agent_router import get_agent
+        get_agent().auto_approve_all_pending()
+
     return {"status": "ok"}
