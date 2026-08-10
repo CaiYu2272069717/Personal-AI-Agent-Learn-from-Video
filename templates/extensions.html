@@ -1,0 +1,582 @@
+{% extends "base.html" %}
+{% set active_page = 'extensions' %}
+{% block title %}扩展能力 - Learn From Video{% endblock %}
+
+{% block head %}
+<style>
+/* === Extensions Page — matches Atelier design system === */
+.ext-page-header { margin-bottom: var(--space-6, 32px); }
+.ext-page-header::before {
+  content: 'EXTENSIONS / CAPABILITIES';
+  display: block;
+  font: 600 10.5px/1 var(--font-mono, monospace);
+  letter-spacing: .12em;
+  color: var(--text-tertiary, #93918b);
+  margin-bottom: 10px;
+}
+
+.ext-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-5, 24px);
+}
+.ext-toolbar-left { display: flex; align-items: center; gap: 12px; }
+.ext-toolbar-right { display: flex; align-items: center; gap: 10px; }
+
+.ext-tabs {
+  display: inline-flex;
+  background: var(--bg-hover, #e5e0d5);
+  border-radius: 4px;
+  padding: 3px;
+}
+.ext-tab {
+  padding: 7px 18px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  font: 600 13px/1.3 var(--font-sans, sans-serif);
+  color: var(--text-secondary, #5f6570);
+  cursor: pointer;
+  transition: all .15s;
+}
+.ext-tab.active {
+  background: var(--bg-elevated, #fffdf8);
+  color: var(--text-primary, #132039);
+  box-shadow: 0 1px 3px rgba(19,32,57,.06);
+}
+.ext-tab:hover:not(.active) { color: var(--text-primary, #132039); }
+
+.ext-count {
+  font: 500 11px/1 var(--font-mono, monospace);
+  color: var(--text-tertiary, #93918b);
+  margin-left: 4px;
+}
+
+/* Cards grid */
+.ext-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 18px;
+}
+
+.ext-card {
+  background: rgba(255,253,248,.74);
+  border: 1px solid rgba(19,32,57,.13);
+  border-radius: 4px;
+  box-shadow: var(--shadow-sm, 0 1px 0 rgba(19,32,57,.04), 0 5px 16px rgba(19,32,57,.04));
+  padding: 20px 22px;
+  cursor: pointer;
+  transition: border-color .2s, box-shadow .2s, transform .2s;
+  position: relative;
+}
+.ext-card:hover {
+  border-color: var(--accent, #df4f2e);
+  box-shadow: var(--shadow-md, 0 12px 30px rgba(19,32,57,.08));
+  transform: translateY(-1px);
+}
+
+.ext-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.ext-card-name {
+  font: 720 15px/1.3 var(--font-display, serif);
+  color: var(--text-primary, #132039);
+}
+.ext-card-desc {
+  font: 400 12.5px/1.6 var(--font-sans, sans-serif);
+  color: var(--text-secondary, #5f6570);
+  margin-bottom: 12px;
+}
+.ext-card-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ext-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font: 500 10.5px/1 var(--font-mono, monospace);
+  padding: 3px 8px;
+  border-radius: 3px;
+  letter-spacing: .02em;
+}
+.ext-badge-ok { background: var(--success-muted, rgba(22,134,108,.10)); color: var(--success, #16866c); }
+.ext-badge-mcp { background: var(--info-muted, rgba(52,111,172,.10)); color: var(--info, #346fac); }
+.ext-badge-accent { background: var(--accent-muted, rgba(223,79,46,.10)); color: var(--accent-text, #cf4325); }
+.ext-tag {
+  font: 400 11px/1 var(--font-mono, monospace);
+  padding: 3px 7px;
+  border-radius: 3px;
+  background: var(--bg-hover, #e5e0d5);
+  color: var(--text-secondary, #5f6570);
+}
+
+/* Toggle */
+.ext-switch { position: relative; width: 34px; height: 18px; flex-shrink: 0; }
+.ext-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+.ext-switch-track {
+  position: absolute; inset: 0;
+  background: var(--bg-active, #d8d2c6);
+  border-radius: 9px;
+  transition: background .2s;
+  cursor: pointer;
+}
+.ext-switch-track::before {
+  content: '';
+  position: absolute;
+  width: 14px; height: 14px;
+  left: 2px; top: 2px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform .2s;
+  box-shadow: 0 1px 2px rgba(0,0,0,.12);
+}
+.ext-switch input:checked + .ext-switch-track { background: var(--success, #16866c); }
+.ext-switch input:checked + .ext-switch-track::before { transform: translateX(16px); }
+
+/* Empty state */
+.ext-empty {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--text-tertiary, #93918b);
+}
+.ext-empty-icon {
+  font-size: 36px;
+  margin-bottom: 12px;
+  opacity: .5;
+}
+.ext-empty p { margin: 4px 0; font-size: 13px; }
+
+/* Modal (shared) */
+.ext-overlay {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(19,32,57,.45);
+  z-index: 1000;
+  justify-content: center;
+  align-items: center;
+  backdrop-filter: blur(2px);
+}
+.ext-overlay.open { display: flex; }
+.ext-dialog {
+  background: var(--bg-elevated, #fffdf8);
+  border: 1px solid var(--border-default, rgba(17,28,46,.14));
+  border-radius: var(--radius-lg, 11px);
+  box-shadow: var(--shadow-lg);
+  width: 92%; max-width: 540px;
+  max-height: 85vh; overflow-y: auto;
+  padding: 28px 26px;
+  position: relative;
+}
+.ext-dialog-close {
+  position: absolute; top: 14px; right: 14px;
+  width: 26px; height: 26px;
+  border-radius: 50%; border: none;
+  background: var(--bg-hover, #e5e0d5);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; color: var(--text-secondary);
+  transition: background .15s;
+}
+.ext-dialog-close:hover { background: var(--bg-active); }
+.ext-dialog h3 {
+  font: 720 18px/1.3 var(--font-display, serif);
+  color: var(--text-primary);
+  margin: 0 0 6px 0;
+}
+.ext-dialog-sub {
+  font: 500 11px/1 var(--font-mono, monospace);
+  color: var(--text-tertiary);
+  letter-spacing: .06em;
+  margin-bottom: 18px;
+}
+.ext-dialog-section {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-subtle, rgba(17,28,46,.07));
+}
+.ext-dialog-section h4 {
+  font: 600 10.5px/1 var(--font-mono, monospace);
+  color: var(--text-tertiary);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  margin: 0 0 10px 0;
+}
+.ext-dialog-tools {
+  display: flex; flex-wrap: wrap; gap: 6px;
+}
+.ext-dialog-tool {
+  font: 400 11.5px/1 var(--font-mono, monospace);
+  padding: 4px 9px;
+  border-radius: 3px;
+  background: var(--bg-hover, #e5e0d5);
+  color: var(--text-secondary);
+}
+
+/* Add dialog textarea */
+.ext-add-textarea {
+  width: 100%;
+  min-height: 100px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md, 7px);
+  padding: 12px 14px;
+  font: 400 13px/1.5 var(--font-mono, monospace);
+  color: var(--text-primary);
+  background: var(--bg-surface, #f8f5ed);
+  resize: vertical;
+  transition: border-color .15s;
+}
+.ext-add-textarea:focus { outline: none; border-color: var(--accent); }
+.ext-add-hint {
+  font: 400 11.5px/1.5 var(--font-sans);
+  color: var(--text-tertiary);
+  margin-top: 8px;
+}
+.ext-add-actions {
+  display: flex; justify-content: flex-end; gap: 10px;
+  margin-top: 18px;
+}
+
+/* Dirs modal */
+.dir-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.dir-item:last-child { border-bottom: none; }
+.dir-item-path {
+  flex: 1;
+  font: 400 12px/1.4 var(--font-mono, monospace);
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+.dir-item-badge {
+  font: 600 9.5px/1 var(--font-mono);
+  padding: 2px 7px;
+  border-radius: 3px;
+  background: var(--accent-muted);
+  color: var(--accent-text);
+  letter-spacing: .05em;
+}
+.dir-add-row {
+  display: flex; gap: 8px;
+  margin-top: 14px;
+}
+.dir-add-row input {
+  flex: 1;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  font: 400 12px/1.4 var(--font-mono, monospace);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+.dir-add-row input:focus { outline: none; border-color: var(--accent); }
+</style>
+{% endblock %}
+
+{% block body %}
+<main class="main-content">
+  <div class="page-container">
+    <div class="ext-page-header">
+      <h1 class="page-title">扩展能力</h1>
+      <p class="page-subtitle">管理 MCP 服务器连接与 Skill 扩展插件。</p>
+    </div>
+
+    <div class="ext-toolbar">
+      <div class="ext-toolbar-left">
+        <div class="ext-tabs">
+          <button class="ext-tab active" data-tab="mcp" onclick="switchTab('mcp')">MCP<span class="ext-count" id="mcp-count"></span></button>
+          <button class="ext-tab" data-tab="skill" onclick="switchTab('skill')">Skill<span class="ext-count" id="skill-count"></span></button>
+        </div>
+      </div>
+      <div class="ext-toolbar-right">
+        <button class="btn" id="btn-dirs" style="display:none" onclick="openDirsModal()">目录管理</button>
+        <button class="btn btn-primary" onclick="openAddDialog()">+ 添加</button>
+      </div>
+    </div>
+
+    <!-- MCP Tab -->
+    <div id="tab-mcp">
+      <div class="ext-grid" id="mcp-grid"></div>
+      <div class="ext-empty" id="mcp-empty" style="display:none">
+        <div class="ext-empty-icon">&#x1F50C;</div>
+        <p>暂无已连接的 MCP 服务器</p>
+        <p>点击右上角「+ 添加」来连接一个 MCP 服务器。</p>
+      </div>
+    </div>
+
+    <!-- Skill Tab -->
+    <div id="tab-skill" style="display:none">
+      <div class="ext-grid" id="skill-grid"></div>
+      <div class="ext-empty" id="skill-empty" style="display:none">
+        <div class="ext-empty-icon">&#x1F9E9;</div>
+        <p>暂无已加载的 Skill</p>
+        <p>点击「+ 添加」或通过「目录管理」加载。</p>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- Detail Modal -->
+<div class="ext-overlay" id="detail-modal" onclick="if(event.target===this)closeDetail()">
+  <div class="ext-dialog">
+    <button class="ext-dialog-close" onclick="closeDetail()">&times;</button>
+    <div id="detail-content"></div>
+  </div>
+</div>
+
+<!-- Add Modal -->
+<div class="ext-overlay" id="add-modal" onclick="if(event.target===this)closeAddDialog()">
+  <div class="ext-dialog">
+    <button class="ext-dialog-close" onclick="closeAddDialog()">&times;</button>
+    <h3 id="add-title">添加 MCP 服务器</h3>
+    <div class="ext-dialog-sub" id="add-sub">INSTALL VIA AGENT</div>
+    <textarea class="ext-add-textarea" id="add-input" placeholder="粘贴配置 JSON 或 GitHub 链接..."></textarea>
+    <div class="ext-add-hint" id="add-hint">支持粘贴 JSON 配置或 GitHub 仓库链接，系统将通过 Agent 自动解析并安装。</div>
+    <div class="ext-add-actions">
+      <button class="btn" onclick="closeAddDialog()">取消</button>
+      <button class="btn btn-primary" onclick="submitAdd()">通过 Agent 添加</button>
+    </div>
+  </div>
+</div>
+
+<!-- Dirs Modal -->
+<div class="ext-overlay" id="dirs-modal" onclick="if(event.target===this)closeDirsModal()">
+  <div class="ext-dialog">
+    <button class="ext-dialog-close" onclick="closeDirsModal()">&times;</button>
+    <h3>Skill 目录管理</h3>
+    <div class="ext-dialog-sub">SKILL DIRECTORIES</div>
+    <div id="dirs-list"></div>
+    <div class="dir-add-row">
+      <input type="text" id="new-dir-input" placeholder="输入 Skill 目录路径，如 D:\\other-agent\\skills">
+      <button class="btn btn-primary" onclick="addDir()">添加</button>
+    </div>
+    <div class="ext-add-hint">添加其他 Agent 的 skills 目录后立即加载，无需重启。</div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentTab = 'mcp';
+let extData = null;
+
+loadExtensions();
+
+async function loadExtensions() {
+  try {
+    const resp = await fetch('/api/extensions');
+    extData = await resp.json();
+    document.getElementById('mcp-count').textContent = (extData.mcp.servers || []).length || '';
+    document.getElementById('skill-count').textContent = (extData.skill.skills || []).length || '';
+    renderCurrentTab();
+  } catch(e) {
+    console.error('Load extensions failed:', e);
+  }
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.ext-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.getElementById('tab-mcp').style.display = tab === 'mcp' ? '' : 'none';
+  document.getElementById('tab-skill').style.display = tab === 'skill' ? '' : 'none';
+  document.getElementById('btn-dirs').style.display = tab === 'skill' ? '' : 'none';
+  renderCurrentTab();
+}
+
+function renderCurrentTab() {
+  if (!extData) return;
+  if (currentTab === 'mcp') renderMCP();
+  else renderSkills();
+}
+
+// === MCP ===
+function renderMCP() {
+  const grid = document.getElementById('mcp-grid');
+  const empty = document.getElementById('mcp-empty');
+  const servers = extData.mcp.servers || [];
+  if (servers.length === 0) { grid.innerHTML = ''; empty.style.display = ''; return; }
+  empty.style.display = 'none';
+  grid.innerHTML = servers.map((s, i) => `
+    <div class="ext-card" onclick="showMCPDetail(${i})">
+      <div class="ext-card-top">
+        <span class="ext-card-name">${s.name}</span>
+        <label class="ext-switch" onclick="event.stopPropagation()">
+          <input type="checkbox" ${s.status === 'connected' ? 'checked' : ''} onchange="toggleMCP('${s.name}', this.checked)">
+          <span class="ext-switch-track"></span>
+        </label>
+      </div>
+      <div class="ext-card-desc">${s.tools_count} 个工具可用</div>
+      <div class="ext-card-footer">
+        <span class="ext-badge ${s.status === 'connected' ? 'ext-badge-ok' : 'ext-badge-accent'}">${s.status === 'connected' ? 'CONNECTED' : 'OFFLINE'}</span>
+        ${s.tools.slice(0, 3).map(t => `<span class="ext-tag">${t}</span>`).join('')}
+        ${s.tools.length > 3 ? `<span class="ext-tag">+${s.tools.length - 3}</span>` : ''}
+      </div>
+    </div>
+  `).join('');
+}
+
+function showMCPDetail(idx) {
+  const s = extData.mcp.servers[idx];
+  document.getElementById('detail-content').innerHTML = `
+    <h3>${s.name}</h3>
+    <div class="ext-dialog-sub">MCP SERVER &middot; ${s.status === 'connected' ? 'CONNECTED' : 'OFFLINE'}</div>
+    <div class="ext-dialog-section">
+      <h4>工具列表 (${s.tools_count})</h4>
+      <div class="ext-dialog-tools">
+        ${s.tools.map(t => `<span class="ext-dialog-tool">${t}</span>`).join('')}
+      </div>
+    </div>
+  `;
+  document.getElementById('detail-modal').classList.add('open');
+}
+
+function toggleMCP(name, enabled) {
+  // TODO: 后端 API 实现 MCP 开关
+  console.log('Toggle MCP:', name, enabled);
+}
+
+// === Skill ===
+function renderSkills() {
+  const grid = document.getElementById('skill-grid');
+  const empty = document.getElementById('skill-empty');
+  const skills = extData.skill.skills || [];
+  if (skills.length === 0) { grid.innerHTML = ''; empty.style.display = ''; return; }
+  empty.style.display = 'none';
+  grid.innerHTML = skills.map((s, i) => `
+    <div class="ext-card" onclick="showSkillDetail(${i})">
+      <div class="ext-card-top">
+        <span class="ext-card-name">${s.display_name}</span>
+        <span class="ext-badge ext-badge-ok">LOADED</span>
+      </div>
+      <div class="ext-card-desc">${s.description || '\u2014'}</div>
+      <div class="ext-card-footer">
+        ${s.triggers.map(t => `<span class="ext-tag">/${t}</span>`).join('')}
+        ${s.tools_count ? `<span class="ext-badge ext-badge-mcp">${s.tools_count} TOOLS</span>` : ''}
+      </div>
+    </div>
+  `).join('');
+}
+
+function showSkillDetail(idx) {
+  const s = extData.skill.skills[idx];
+  document.getElementById('detail-content').innerHTML = `
+    <h3>${s.display_name}</h3>
+    <div class="ext-dialog-sub">SKILL &middot; ${s.name}</div>
+    <div class="ext-dialog-section">
+      <h4>描述</h4>
+      <p style="font:400 13px/1.7 var(--font-sans);color:var(--text-secondary);margin:0">${s.description || '无描述'}</p>
+    </div>
+    <div class="ext-dialog-section">
+      <h4>触发关键词</h4>
+      <div class="ext-dialog-tools">
+        ${s.triggers.map(t => `<span class="ext-dialog-tool">/${t}</span>`).join('')}
+      </div>
+    </div>
+    ${s.tools_count ? `
+    <div class="ext-dialog-section">
+      <h4>自带工具 (${s.tools_count})</h4>
+      <div class="ext-dialog-tools">
+        ${s.tools.map(t => `<span class="ext-dialog-tool">${t}</span>`).join('')}
+      </div>
+    </div>` : ''}
+    <div class="ext-dialog-section">
+      <h4>来源目录</h4>
+      <p style="font:400 12px/1.4 var(--font-mono);color:var(--text-tertiary);margin:0">${s.path}</p>
+    </div>
+  `;
+  document.getElementById('detail-modal').classList.add('open');
+}
+
+function closeDetail() {
+  document.getElementById('detail-modal').classList.remove('open');
+}
+
+// === Dirs Modal ===
+function openDirsModal() {
+  renderDirs();
+  document.getElementById('dirs-modal').classList.add('open');
+}
+function closeDirsModal() {
+  document.getElementById('dirs-modal').classList.remove('open');
+}
+
+function renderDirs() {
+  const list = document.getElementById('dirs-list');
+  const primary = extData.skill.primary_dir;
+  const extras = extData.skill.extra_dirs || [];
+  const all = [{ path: primary, primary: true }, ...extras.map(p => ({ path: p, primary: false }))];
+  list.innerHTML = all.map(d => `
+    <div class="dir-item">
+      <span class="dir-item-path">${d.path}</span>
+      ${d.primary ? '<span class="dir-item-badge">DEFAULT</span>' : `<button class="btn" onclick="removeDir('${d.path.replace(/\\/g, '\\\\\\\\')}')" style="padding:4px 12px;font-size:11px">移除</button>`}
+    </div>
+  `).join('');
+}
+
+async function addDir() {
+  const input = document.getElementById('new-dir-input');
+  const path = input.value.trim();
+  if (!path) return;
+  try {
+    const resp = await fetch('/api/extensions/skill-dirs', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ path }),
+    });
+    const data = await resp.json();
+    if (data.error) { alert(data.error); return; }
+    input.value = '';
+    await loadExtensions();
+    renderDirs();
+  } catch(e) { alert(e.message); }
+}
+
+async function removeDir(path) {
+  if (!confirm('确定移除此目录？')) return;
+  try {
+    const resp = await fetch('/api/extensions/skill-dirs', {
+      method: 'DELETE', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ path }),
+    });
+    const data = await resp.json();
+    if (data.error) { alert(data.error); return; }
+    await loadExtensions();
+    renderDirs();
+  } catch(e) { alert(e.message); }
+}
+
+// === Add Modal ===
+function openAddDialog() {
+  const isMcp = currentTab === 'mcp';
+  document.getElementById('add-title').textContent = isMcp ? '添加 MCP 服务器' : '添加 Skill';
+  document.getElementById('add-sub').textContent = isMcp ? 'INSTALL MCP SERVER' : 'INSTALL SKILL';
+  document.getElementById('add-hint').textContent = isMcp
+    ? '支持粘贴 JSON 配置（如 {"command":"npx", "args":[...]}）或 GitHub 仓库链接。'
+    : '支持粘贴 Skill 的 GitHub 链接或目录路径。';
+  document.getElementById('add-input').value = '';
+  document.getElementById('add-input').placeholder = isMcp
+    ? '粘贴 MCP 配置 JSON 或 GitHub 链接...'
+    : '粘贴 Skill GitHub 链接或目录路径...';
+  document.getElementById('add-modal').classList.add('open');
+}
+function closeAddDialog() {
+  document.getElementById('add-modal').classList.remove('open');
+}
+
+function submitAdd() {
+  const input = document.getElementById('add-input').value.trim();
+  if (!input) { alert('请输入内容'); return; }
+  const msg = currentTab === 'mcp'
+    ? '请帮我安装这个 MCP 服务器到 mcp_config.json 并连接：\n' + input
+    : '请帮我安装这个 Skill 到 skills/ 目录：\n' + input;
+  window.location.href = '/?prefill=' + encodeURIComponent(msg);
+}
+</script>
+{% endblock %}
