@@ -30,7 +30,8 @@ conversations/
 workspace/
 
 # Local runtime artifacts
-output/
+output/*
+!output/agent-eval-*.md
 temp/
 .playwright-cli/
 .pytest_cache/
@@ -43,6 +44,9 @@ temp/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local-only project context (not for publish)
+上下文.md
 
 # WorkBuddy
 .workbuddy/
