@@ -5,6 +5,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import re
 import subprocess
@@ -16,6 +17,8 @@ from dataclasses import dataclass
 
 from ..config import get_config, WORKDIR, BASE_DIR
 from .snapshots import capture_project_state, record_file_before, record_project_changes
+
+logger = logging.getLogger(__name__)
 
 
 def infer_explicit_tool_name(user_message: str) -> Optional[str]:
@@ -152,23 +155,52 @@ class ToolDef:
 
 
 class ToolRegistry:
-    """工具注册表"""
+    """工具注册表（本地工具 + MCP 远程工具 + Skill 工具）"""
 
     def __init__(self):
         self._tools: Dict[str, ToolDef] = {}
+        self._mcp_manager = None  # MCPManager 实例
+        self._skill_manager = None  # SkillManager 实例
+        self._mcp_tool_defs: List[Dict[str, Any]] = []
+        self._skill_tool_defs: List[Dict[str, Any]] = []
         self._register_builtin_tools()
+
+    def set_mcp_manager(self, mcp_manager):
+        """注入 MCP 管理器并注册远程工具定义"""
+        from .mcp_client import MCPManager
+        self._mcp_manager = mcp_manager
+        # 将 MCP 工具转为 function calling 格式
+        self._mcp_tool_defs = []
+        for tool in mcp_manager.get_all_tools():
+            self._mcp_tool_defs.append({
+                "type": "function",
+                "function": {
+                    "name": tool.full_name,
+                    "description": f"[MCP:{tool.server_name}] {tool.description}",
+                    "parameters": tool.input_schema,
+                }
+            })
+        logger.info(f"已注册 {len(self._mcp_tool_defs)} 个 MCP 工具")
+
+    def set_skill_manager(self, skill_manager):
+        """注入 Skill 管理器并注册 Skill 工具定义"""
+        from .skill_loader import SkillManager
+        self._skill_manager = skill_manager
+        self._skill_tool_defs = skill_manager.get_all_tool_defs()
+        logger.info(f"已注册 {len(self._skill_tool_defs)} 个 Skill 工具")
 
     def register(self, tool_def: ToolDef):
         """注册工具"""
         self._tools[tool_def.name] = tool_def
 
     def get_tool(self, name: str) -> Optional[ToolDef]:
-        """获取工具定义"""
+        """获取工具定义（本地工具）"""
         return self._tools.get(name)
 
     def list_tools(self) -> List[Dict[str, Any]]:
-        """列出所有工具（用于 function calling schema）"""
+        """列出所有工具（本地 + MCP + Skill，用于 function calling schema）"""
         result = []
+        # 本地工具
         for tool in self._tools.values():
             result.append({
                 "type": "function",
@@ -178,7 +210,17 @@ class ToolRegistry:
                     "parameters": tool.parameters,
                 }
             })
+        # MCP 工具
+        result.extend(self._mcp_tool_defs)
+        # Skill 工具
+        result.extend(self._skill_tool_defs)
         return result
+
+    def is_mcp_tool(self, name: str) -> bool:
+        return name.startswith("mcp__")
+
+    def is_skill_tool(self, name: str) -> bool:
+        return name.startswith("skill__")
 
     async def execute(
         self,
@@ -187,7 +229,20 @@ class ToolRegistry:
         conversation_id: int = 0,
         user_message_id: int = 0,
     ) -> str:
-        """执行工具"""
+        """执行工具（自动路由到本地/MCP/Skill）"""
+        # MCP 远程工具
+        if self.is_mcp_tool(name):
+            if not self._mcp_manager:
+                return json.dumps({"error": "MCP 管理器未初始化"}, ensure_ascii=False)
+            return await self._mcp_manager.call_tool(name, arguments)
+
+        # Skill 工具
+        if self.is_skill_tool(name):
+            if not self._skill_manager:
+                return json.dumps({"error": "Skill 管理器未初始化"}, ensure_ascii=False)
+            return await self._skill_manager.call_tool(name, arguments)
+
+        # 本地工具
         tool = self._tools.get(name)
         if not tool:
             return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
@@ -268,6 +323,21 @@ class ToolRegistry:
         self.register(ToolDef(
             name="web_search",
             description='联网搜索引擎查询（类似 Google/Bing 搜索）。当用户要求「搜索」、「查找」、「查一下」网络信息，或需要实时网络数据、最新资讯时，必须使用此工具。返回结果列表（每条含标题、URL、摘要）。本环境的搜索能力由此工具提供，没有其他内置搜索。',
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "搜索关键词"},
+                },
+                "required": ["query"],
+            },
+            risk_level="safe",
+            handler=self._tool_web_search,
+        ))
+
+        # --- search (别名，兼容 GLM 等模型的内置 search 工具) ---
+        self.register(ToolDef(
+            name="search",
+            description='联网搜索（web_search 别名）。搜索实时网络信息。',
             parameters={
                 "type": "object",
                 "properties": {

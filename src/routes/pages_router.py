@@ -46,6 +46,12 @@ async def evaluation_page(request: Request):
     return templates.TemplateResponse(request=request, name="evaluation.html")
 
 
+@router.get("/extensions", response_class=HTMLResponse)
+async def extensions_page(request: Request):
+    """扩展能力管理页"""
+    return templates.TemplateResponse(request=request, name="extensions.html")
+
+
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     """设置页"""

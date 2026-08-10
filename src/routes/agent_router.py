@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from typing import Optional
+from typing import Optional, List, Dict
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -15,6 +15,8 @@ from ..agent.snapshots import restore_from_turn
 from ..database import Database
 
 router = APIRouter(prefix="/agent", tags=["agent"])
+# 直接流式端点（前端直连，无需后台 run）
+stream_router = APIRouter(prefix="/chat", tags=["chat-stream"])
 _agent: Optional[AgentCore] = None
 
 
@@ -124,9 +126,9 @@ async def stream_run(run_id: str, after: int = Query(default=0, ge=0)):
                 break
 
             idle_ticks += 1
-            if idle_ticks % 40 == 0:
+            if idle_ticks % 80 == 0:
                 yield ": keep-alive\n\n"
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.1)
 
     return StreamingResponse(
         event_generator(),
@@ -306,3 +308,78 @@ async def get_memory():
 async def clear_memory():
     clear_dynamic_section()
     return {"status": "ok"}
+
+
+# ============================================================
+# 直接流式聊天端点 — 前端通过 POST /api/chat/stream 直连
+# ============================================================
+
+class StreamChatRequest(BaseModel):
+    message: str
+    messages: List[Dict] = []
+    conversation_id: str = ""
+
+
+@stream_router.post("/stream")
+async def direct_stream_chat(req: StreamChatRequest):
+    """直接流式输出，无需后台 run，适合前端实时展示。"""
+    if not req.message.strip():
+        raise HTTPException(status_code=400, detail="消息不能为空")
+
+    agent = get_agent()
+
+    # 从前端传入的 messages 中提取历史（排除最后一条 user 消息，因为 core.chat 会自行添加）
+    history = []
+    for msg in req.messages:
+        if msg.get("role") in ("user", "assistant") and msg.get("content"):
+            history.append({"role": msg["role"], "content": msg["content"]})
+    # 去掉最后一条（就是当前 message 本身）
+    if history and history[-1].get("role") == "user" and history[-1].get("content") == req.message:
+        history = history[:-1]
+
+    async def event_generator():
+        try:
+            async for event in agent.chat(
+                user_message=req.message,
+                conversation_id=0,  # 直接流模式不依赖 DB 会话
+                history=history,
+                user_message_id=0,
+            ):
+                event_type = event.get("type", "unknown")
+
+                # 映射后端事件类型到前端期望格式
+                if event_type == "text":
+                    yield f"event: content\ndata: {json.dumps({'content': event.get('content', '')}, ensure_ascii=False)}\n\n"
+                elif event_type == "thinking":
+                    yield f"event: thinking\ndata: {json.dumps({'content': event.get('content', '')}, ensure_ascii=False)}\n\n"
+                elif event_type == "thinking_done":
+                    yield f"event: thinking_done\ndata: {json.dumps({'content': ''}, ensure_ascii=False)}\n\n"
+                elif event_type == "tool_call":
+                    tool_name = event.get("tool", "unknown")
+                    yield f"event: tool_call\ndata: {json.dumps({'content': f'调用工具: {tool_name}'}, ensure_ascii=False)}\n\n"
+                elif event_type == "tool_result":
+                    tool_name = event.get("tool", "")
+                    yield f"event: tool_result\ndata: {json.dumps({'content': f'{tool_name} 完成'}, ensure_ascii=False)}\n\n"
+                elif event_type == "status":
+                    # 状态事件（thinking 标签）作为心跳/提示
+                    label = event.get("label", "处理中")
+                    yield f"event: tool_call\ndata: {json.dumps({'content': label}, ensure_ascii=False)}\n\n"
+                elif event_type == "done":
+                    yield f"event: done\ndata: {json.dumps({'content': event.get('content', '')}, ensure_ascii=False)}\n\n"
+                    return
+                elif event_type == "error":
+                    yield f"event: error\ndata: {json.dumps({'content': event.get('content', '未知错误')}, ensure_ascii=False)}\n\n"
+                    return
+                # confirm_needed / tool_blocked 等暂不在直接流模式处理
+        except Exception as exc:
+            yield f"event: error\ndata: {json.dumps({'content': str(exc)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

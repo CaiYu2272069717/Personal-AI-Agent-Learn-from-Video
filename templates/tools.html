@@ -89,7 +89,7 @@
           <div class="upload-zone-icon">&#x1F4C1;</div>
           <div class="upload-zone-text">拖拽音频/视频文件到这里，或点击选择</div>
           <div class="upload-zone-hint">支持 MP3、WAV、FLAC、OGG、MP4、MKV、AVI</div>
-          <input type="file" accept="audio/*,video/*" onchange="handleTranscribeFile(this)">
+          <input type="file" accept="audio/*,video/*" id="transcribe-file">
         </div>
       </div>
       <div class="form-group">
@@ -181,7 +181,7 @@
     </div>
     <div class="tool-panel-body">
       <div class="form-group">
-        <div class="upload-zone">
+        <div class="upload-zone" id="ocr-upload">
           <div class="upload-zone-icon">&#x1F5BC;&#xFE0F;</div>
           <div class="upload-zone-text">拖拽图片到这里，或点击选择</div>
           <div class="upload-zone-hint">JPG、PNG、WebP</div>
@@ -229,7 +229,7 @@
     </div>
     <div class="tool-panel-body">
       <div class="form-group">
-        <div class="upload-zone">
+        <div class="upload-zone" id="extract-upload">
           <div class="upload-zone-icon">&#x1F3AC;</div>
           <div class="upload-zone-text">拖拽视频文件到这里</div>
           <div class="upload-zone-hint">MP4、MKV、AVI、MOV、WebM</div>
@@ -272,13 +272,73 @@ function closeTool() {
 document.querySelectorAll('.tool-panel').forEach(p => p.addEventListener('click', e => { if(e.target===p) closeTool(); }));
 document.addEventListener('keydown', e => { if(e.key==='Escape') closeTool(); });
 
-function handleTranscribeFile(input) {
-  transcribeFile = input.files[0];
-  if (transcribeFile) {
-    document.getElementById('transcribe-btn').disabled = false;
-    input.closest('.upload-zone').querySelector('.upload-zone-text').textContent = transcribeFile.name;
+// === 通用文件选择反馈 ===
+function handleFileSelect(input) {
+  const zone = input.closest('.upload-zone');
+  if (!zone) return;
+  const textEl = zone.querySelector('.upload-zone-text');
+  const hintEl = zone.querySelector('.upload-zone-hint');
+  const file = input.files[0];
+
+  if (file) {
+    const sizeKB = (file.size / 1024).toFixed(0);
+    const sizeStr = file.size > 1024 * 1024 ? `${(file.size/1048576).toFixed(1)} MB` : `${sizeKB} KB`;
+    if (textEl) textEl.textContent = file.name;
+    if (hintEl) hintEl.textContent = sizeStr;
+    zone.classList.add('has-file');
+  } else {
+    zone.classList.remove('has-file');
+  }
+
+  // transcribe 需要禁用/启用按钮
+  if (input.id === 'transcribe-file') {
+    transcribeFile = file || null;
+    const btn = document.getElementById('transcribe-btn');
+    if (btn) btn.disabled = !transcribeFile;
   }
 }
+
+// === 通用拖拽上传 ===
+function initUploadZones() {
+  document.querySelectorAll('.upload-zone').forEach(zone => {
+    const input = zone.querySelector('input[type="file"]');
+    if (!input) return;
+
+    zone.addEventListener('dragover', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      zone.classList.add('dragover');
+    });
+    zone.addEventListener('dragleave', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      // 只有真正离开 zone（不是进入子元素）才移除高亮
+      if (e.target === zone) zone.classList.remove('dragover');
+    });
+    zone.addEventListener('drop', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      zone.classList.remove('dragover');
+      const files = e.dataTransfer.files;
+      if (files && files.length > 0) {
+        // 用 DataTransfer 把拖进来的文件塞进 input
+        const dt = new DataTransfer();
+        dt.items.add(files[0]);
+        input.files = dt.files;
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    });
+  });
+}
+
+// 页面加载后初始化
+document.addEventListener('DOMContentLoaded', () => {
+  initUploadZones();
+  // 给所有 upload-zone 内的 file input 绑定 change 事件
+  document.querySelectorAll('.upload-zone input[type="file"]').forEach(input => {
+    input.addEventListener('change', () => handleFileSelect(input));
+  });
+});
 
 async function runTranscribe() {
   if (!transcribeFile) return;

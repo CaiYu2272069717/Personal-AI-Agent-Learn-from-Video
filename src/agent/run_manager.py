@@ -82,8 +82,20 @@ class AgentRunManager:
         async def flush_text():
             nonlocal text_buffer, last_flush
             if text_buffer:
-                await self._record_event(run_id, {"type": "text", "content": text_buffer})
-                text_buffer = ""
+                # Split large buffers into smaller chunks for progressive UI rendering.
+                # Models like Gemini return content in large blocks; splitting ensures
+                # the frontend event stream receives progressive updates.
+                chunk_size = 80
+                if len(text_buffer) > chunk_size * 2:
+                    while text_buffer:
+                        chunk = text_buffer[:chunk_size]
+                        text_buffer = text_buffer[chunk_size:]
+                        await self._record_event(run_id, {"type": "text", "content": chunk})
+                        if text_buffer:
+                            await asyncio.sleep(0.02)
+                else:
+                    await self._record_event(run_id, {"type": "text", "content": text_buffer})
+                    text_buffer = ""
                 last_flush = asyncio.get_running_loop().time()
 
         try:

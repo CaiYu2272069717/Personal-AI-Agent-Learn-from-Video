@@ -77,7 +77,8 @@
 
     <div class="chat-input-area">
       <div class="chat-input-wrapper" id="chat-input-wrapper">
-        <textarea id="chat-input" class="chat-input" placeholder="输入消息，Shift+Enter 换行，可拖拽文件到此处" rows="1" onkeydown="handleKey(event)"></textarea>
+        <div class="skill-suggestions" id="skill-suggestions"></div>
+        <textarea id="chat-input" class="chat-input" placeholder="输入消息，/ 唤起技能，Shift+Enter 换行" rows="1" onkeydown="handleKey(event)" oninput="handleInput()"></textarea>
         <div class="chat-input-files" id="file-list"></div>
         <div class="chat-input-meta">
           <div class="chat-input-left">
@@ -143,5 +144,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/chat.js"></script>
+<script src="/static/js/chat.js?v=20260810c"></script>
 {% endblock %}

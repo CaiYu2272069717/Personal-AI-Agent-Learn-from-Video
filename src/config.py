@@ -105,6 +105,22 @@ class AgentPermissionConfig:
 
 
 @dataclass
+class MCPConfig:
+    """MCP 服务器配置"""
+    enabled: bool = True
+    config_path: str = ""  # 默认使用 BASE_DIR / "mcp_config.json"
+
+
+@dataclass
+class SkillConfig:
+    """Skill 扩展配置"""
+    enabled: bool = True
+    skills_dir: str = ""  # 默认使用 BASE_DIR / "skills"
+    extra_dirs: list = field(default_factory=list)  # 额外 Skill 目录（如其他 Agent 的 skills/）
+    auto_match: bool = True  # 根据用户输入自动匹配 Skill
+
+
+@dataclass
 class AppConfig:
     """应用总配置"""
     asr: ASRConfig = field(default_factory=ASRConfig)
@@ -115,6 +131,8 @@ class AppConfig:
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
     agent_permission: AgentPermissionConfig = field(default_factory=AgentPermissionConfig)
+    mcp: MCPConfig = field(default_factory=MCPConfig)
+    skill: SkillConfig = field(default_factory=SkillConfig)
     host: str = "127.0.0.1"
     port: int = 8000
 
@@ -174,6 +192,8 @@ def load_config() -> AppConfig:
         web_search=WebSearchConfig(**base["web_search"]),
         pipeline=PipelineConfig(**base["pipeline"]),
         agent_permission=AgentPermissionConfig(**base["agent_permission"]),
+        mcp=MCPConfig(**base.get("mcp", {})),
+        skill=SkillConfig(**base.get("skill", {})),
         host=base["host"],
         port=base["port"],
     )

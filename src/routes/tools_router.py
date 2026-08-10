@@ -192,6 +192,13 @@ async def ocr_tool(
         target = str(img_path)
 
     result = await ocr_image(target)
+    try:
+        error_payload = json.loads(result)
+    except (TypeError, json.JSONDecodeError):
+        error_payload = None
+    if isinstance(error_payload, dict) and error_payload.get("error"):
+        raise HTTPException(502, str(error_payload["error"]))
+
     return {"text": result, "source": "upload" if file else "url"}
 
 
