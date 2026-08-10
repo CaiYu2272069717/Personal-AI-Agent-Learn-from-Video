@@ -12,7 +12,8 @@
 - 支持后台运行、流式输出、会话历史和工具调用的 AI Agent
 - 可折叠的思考/工具执行过程，切换页面后任务继续并自动恢复进度
 - 联网搜索、网页抓取、文件操作、受控命令执行和受限 Python 代码沙箱
-- 历史会话删除（两次点击确认）、按轮次回退对话与 Agent 文件改动（回退后原消息回填输入框）
+- **MCP 扩展**：通过 `mcp_config.json` 配置 MCP 服务器，启动时自动连接并注册远程工具（命名空间 `mcp__<server>__<tool>`）
+- **Skill 扩展**：从 `skills/` 目录加载 `SKILL.md`（YAML frontmatter + 指令），支持触发词自动匹配注入 system prompt、Skill 自带工具注册（命名空间 `skill__<skill>__<tool>`）
 - 斜杠命令实时检索：输入 `/` 弹出 Skill 建议，支持过滤和键盘导航
 - 多模型兼容：Gemini、GLM、DeepSeek 等 OpenAI 兼容模型均可正常流式输出与工具调用
 - 默认三级权限确认，并可选"允许完全访问"模式
@@ -102,6 +103,38 @@ TAVILY_API_KEY
 - 升级前产生的旧会话没有文件检查点，因此不会显示回退按钮。
 
 Revert 会精确跟踪 `write_file`、`edit_file`，并比较 `run_command` 执行前后的项目/工作空间文件。SQLite 业务数据、知识库流水线数据、缓存和临时媒体不在回退范围内。
+
+## MCP 与 Skill 扩展
+
+Agent 除内置工具外，支持两种可插拔扩展方式。
+
+### MCP 扩展
+
+`mcp_config.json` 用于配置外部 MCP 服务器。应用启动时会尝试连接其中列出的服务器，并将它们暴露的工具注册为 `mcp__<server>__<tool>`，与内置工具统一走 Agent 的权限确认与流式输出流程。配置示例：
+
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "npx",
+      "args": ["-y", "@example/mcp-server"]
+    }
+  }
+}
+```
+
+### Skill 扩展
+
+`skills/` 目录用于放置基于 `SKILL.md` 的扩展包。每个 Skill 包含 YAML frontmatter（元数据 + 触发词）和 Markdown 指令正文：
+
+- 触发词自动匹配：当用户消息命中 Skill 的触发词时，对应指令会自动注入到该轮 system prompt 中。
+- 自带工具注册：Skill 可以携带自己的 `tools.py`，注册为 `skill__<skill>__<tool>`。
+- 斜杠命令：在输入框中键入 `/`，前端会实时检索并展示可用 Skill，支持过滤、↑↓ 键盘选择和 Tab 确认。
+
+已内置示例：
+
+- `skills/web-search/SKILL.md`：网络搜索 Skill
+- `skills/code-runner/`：代码沙箱 Skill（含自带 `tools.py`）
 
 ## 隐私与安全
 
