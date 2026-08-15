@@ -11,6 +11,7 @@ let currentReader = null;
 let messages = [];  // {role, content}
 let fullAccess = false;
 let welcomeHtmlCache = '';  // 首页 welcome 缓存
+let uploadedFiles = [];  // 已上传到工作目录的文件 [{name, rel_path}]
 
 /* ====== DOM refs ====== */
 const $ = id => document.getElementById(id);
@@ -56,7 +57,15 @@ async function loadSkillsCache() {
 function handleInput() {
     autoResize();
     const ta = $('chat-input');
-    if (ta) handleSlashSuggestion(ta.value);
+    if (!ta) return;
+    // '/' 仅在开头唤起技能；'@' 在任意位置唤起工作区文件检索
+    if (ta.value.startsWith('/')) {
+        hideFileSuggestions();
+        handleSlashSuggestion(ta.value);
+    } else {
+        $('skill-suggestions').style.display = 'none';
+        handleFileSuggestion(ta);
+    }
 }
 
 async function handleSlashSuggestion(value) {
@@ -142,10 +151,125 @@ function updateSuggestionHighlight(items) {
     });
 }
 
+
+/* ====== @ 工作区文件检索 ====== */
+let fileSuggestState = { items: [], idx: -1, tokenStart: -1, query: '' };
+let fileSuggestTimer = null;
+
+function hideFileSuggestions() {
+    const panel = $('file-suggestions');
+    if (panel) panel.style.display = 'none';
+    fileSuggestState.idx = -1;
+    fileSuggestState.tokenStart = -1;
+}
+
+function currentAtToken(ta) {
+    // 找到光标前最近的 '@'，且其后不含空白，视为正在输入的引用 token
+    const pos = ta.selectionStart;
+    const text = ta.value.slice(0, pos);
+    const at = text.lastIndexOf('@');
+    if (at === -1) return null;
+    const token = text.slice(at + 1);
+    if (/\s/.test(token)) return null;
+    // '@' 前必须是行首或空白，避免匹配邮箱等
+    if (at > 0 && !/\s/.test(text[at - 1])) return null;
+    return { start: at, query: token };
+}
+
+function handleFileSuggestion(ta) {
+    const tok = currentAtToken(ta);
+    if (!tok) { hideFileSuggestions(); return; }
+    fileSuggestState.tokenStart = tok.start;
+    fileSuggestState.query = tok.query;
+    if (fileSuggestTimer) clearTimeout(fileSuggestTimer);
+    fileSuggestTimer = setTimeout(() => fetchFileSuggestions(tok.query), 120);
+}
+
+async function fetchFileSuggestions(query) {
+    let items = [];
+    try {
+        const resp = await fetch('/api/agent/workspace-files?query=' + encodeURIComponent(query));
+        if (resp.ok) items = (await resp.json()).items || [];
+    } catch(e) { /* ignore */ }
+    fileSuggestState.items = items;
+    fileSuggestState.idx = -1;
+    renderFileSuggestions();
+}
+
+function renderFileSuggestions() {
+    const panel = $('file-suggestions');
+    if (!panel) return;
+    const items = fileSuggestState.items;
+    if (!items.length) { hideFileSuggestions(); return; }
+    const rows = items.map((it, i) => {
+        const icon = it.type === 'dir' ? '📁' : '📄';
+        return `
+        <div class="skill-suggestion-item${i === fileSuggestState.idx ? ' active' : ''}" data-idx="${i}">
+            <span class="skill-name">${icon} ${escapeHtml(it.name)}</span>
+            <span class="skill-desc">${escapeHtml(it.rel_path)}</span>
+            <span class="skill-kbd">Tab</span>
+        </div>`;
+    }).join('');
+    panel.innerHTML = `<div class="skill-suggestions-header">工作区文件 · ↑↓ 选择 · Tab 确认</div>${rows}`;
+    panel.style.display = 'block';
+    panel.querySelectorAll('.skill-suggestion-item').forEach(item => {
+        item.onclick = () => selectFileSuggestion(parseInt(item.dataset.idx));
+    });
+}
+
+function selectFileSuggestion(idx) {
+    const it = fileSuggestState.items[idx];
+    const ta = $('chat-input');
+    if (!it || !ta) return;
+    const start = fileSuggestState.tokenStart;
+    const pos = ta.selectionStart;
+    const before = ta.value.slice(0, start);
+    const after = ta.value.slice(pos);
+    const insert = '@' + it.rel_path + (it.type === 'dir' ? '' : ' ');
+    ta.value = before + insert + after;
+    const caret = (before + insert).length;
+    ta.focus();
+    ta.setSelectionRange(caret, caret);
+    // 选中目录后继续检索其子项；选中文件后关闭
+    if (it.type === 'dir') {
+        handleFileSuggestion(ta);
+    } else {
+        hideFileSuggestions();
+    }
+    autoResize();
+}
+
+function handleFileSuggestKeydown(e) {
+    const panel = $('file-suggestions');
+    if (!panel || panel.style.display === 'none') return false;
+    const items = fileSuggestState.items;
+    if (!items.length) return false;
+    if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        fileSuggestState.idx = (fileSuggestState.idx + 1) % items.length;
+        renderFileSuggestions();
+        return true;
+    } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        fileSuggestState.idx = (fileSuggestState.idx - 1 + items.length) % items.length;
+        renderFileSuggestions();
+        return true;
+    } else if (e.key === 'Tab' || (e.key === 'Enter' && fileSuggestState.idx >= 0)) {
+        e.preventDefault();
+        selectFileSuggestion(fileSuggestState.idx >= 0 ? fileSuggestState.idx : 0);
+        return true;
+    } else if (e.key === 'Escape') {
+        hideFileSuggestions();
+        return true;
+    }
+    return false;
+}
+
 /* ====== Send Message ====== */
 function handleKey(e) {
-    // Let suggestion panel handle keys first
+    // Let suggestion panels handle keys first (skill '/' then file '@')
     if (handleSuggestionKeydown(e)) return;
+    if (handleFileSuggestKeydown(e)) return;
     if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
@@ -154,14 +278,22 @@ function handleKey(e) {
 
 async function sendMessage() {
     const input = $('chat-input');
-    const message = input.value.trim();
-    if (!message || isStreaming) return;
+    let message = input.value.trim();
+    if ((!message && !uploadedFiles.length) || isStreaming) return;
+
+    // 把已上传文件作为工作区引用附加到消息，让 Agent 知道可直接读取这些文件
+    if (uploadedFiles.length) {
+        const refs = uploadedFiles.map(f => `@${f.rel_path}`).join(' ');
+        const note = `[已上传到工作目录的文件：${refs}]`;
+        message = message ? `${message}\n\n${note}` : note;
+    }
 
     input.value = '';
     input.style.height = 'auto';
-    // Close skill suggestions
+    // Close suggestion panels
     const sugPanel = $('skill-suggestions');
     if (sugPanel) sugPanel.style.display = 'none';
+    hideFileSuggestions();
 
     // Hide welcome
     const welcome = $('chat-welcome');
@@ -170,6 +302,10 @@ async function sendMessage() {
     // Show user message (revert button added after backend confirms)
     const userMsgEl = appendUserMessage(message);
     messages.push({ role: 'user', content: message });
+
+    // 发送后清空附件列表
+    uploadedFiles = [];
+    renderUploadedFiles();
 
     // Use backend run system (persists conversation + messages)
     startAgentRun(message, userMsgEl);
@@ -261,6 +397,12 @@ async function startAgentRun(message, userMsgEl) {
                         case 'content':
                             contentText += (data.content || '');
                             contentEl.innerHTML = renderMarkdown(contentText);
+                            break;
+
+                        case 'text_discard':
+                            // 丢弃本轮工具调用前的临时正文，避免与最终答案重复显示
+                            contentText = '';
+                            contentEl.innerHTML = '';
                             break;
 
                         case 'tool_call':
@@ -643,6 +785,8 @@ async function reconnectToRun(runId) {
                         case 'thinking_done': thinkingContainer.classList.add('collapsed'); break;
                         case 'text': case 'content':
                             contentText += (data.content || ''); contentEl.innerHTML = renderMarkdown(contentText); break;
+                        case 'text_discard':
+                            contentText = ''; contentEl.innerHTML = ''; break;
                         case 'tool_call': statusEl.style.display = 'block'; statusEl.innerHTML = `<span class="msg-tool-badge">⚡ ${escapeHtml(data.tool || data.content || '工具调用')}</span>`; break;
                         case 'tool_result': statusEl.innerHTML = `<span class="msg-tool-badge done">✓ ${escapeHtml(data.tool || data.content || '完成')}</span>`; break;
                         case 'done': if (!contentText && data.content) { contentText = data.content; contentEl.innerHTML = renderMarkdown(contentText); } finishStream(contentText, msgEl); loadConversations(); return;
@@ -760,9 +904,11 @@ async function openWorkspaceSettings() {
         const modelInput = $('agent-model');
         const roundsInput = $('max-rounds');
         const wsAccess = $('workspace-full-access');
+        const dirInput = $('workspace-dir');
         if (modelInput) modelInput.value = agentLlm.model || '';
         if (roundsInput) roundsInput.value = agentLlm.max_tool_rounds || 10;
         if (wsAccess) wsAccess.checked = !!perm.full_access;
+        if (dirInput) dirInput.value = perm.working_dir || '';
     } catch(e) { console.error('加载工作空间设置失败:', e); }
 }
 function closeWorkspaceSettings() {
@@ -806,6 +952,7 @@ async function saveWorkspaceSettings() {
     const modelInput = $('agent-model');
     const roundsInput = $('max-rounds');
     const wsAccess = $('workspace-full-access');
+    const dirInput = $('workspace-dir');
     
     const payload = {};
     
@@ -815,13 +962,16 @@ async function saveWorkspaceSettings() {
     if (roundsInput && roundsInput.value) agentLlm.max_tool_rounds = parseInt(roundsInput.value) || 10;
     if (Object.keys(agentLlm).length) payload.agent_llm = agentLlm;
     
-    // 保存完全访问
+    // 保存工作目录与完全访问
+    const perm = {};
+    if (dirInput) perm.working_dir = dirInput.value.trim();
     if (wsAccess) {
-        payload.agent_permission = { full_access: wsAccess.checked };
+        perm.full_access = wsAccess.checked;
         fullAccess = wsAccess.checked;
         const inputToggle = $('agent-full-access');
         if (inputToggle) inputToggle.checked = wsAccess.checked;
     }
+    if (Object.keys(perm).length) payload.agent_permission = perm;
     
     try {
         const resp = await fetch('/api/settings', {
@@ -877,17 +1027,52 @@ async function loadFullAccessState() {
     } catch(e) { /* ignore */ }
 }
 
-/* ====== File Upload (stub) ====== */
-function handleFileUpload(event) {
-    const files = event.target.files;
+/* ====== File Upload（真实上传到工作目录，可累加、可删除）====== */
+async function handleFileUpload(event) {
+    const files = Array.from(event.target.files || []);
+    // 允许再次选择同一文件：用完即清空 input
+    event.target.value = '';
+    if (!files.length) return;
+
+    const form = new FormData();
+    for (const f of files) form.append('files', f);
+
+    // 先放置"上传中"占位标签
+    renderUploadedFiles();
+    try {
+        const resp = await fetch('/api/agent/upload', { method: 'POST', body: form });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            alert('上传失败: ' + (err.detail || resp.status));
+            return;
+        }
+        const data = await resp.json();
+        for (const it of (data.files || [])) {
+            // 去重（同名覆盖为后端返回的最终名）
+            uploadedFiles.push({ name: it.name, rel_path: it.rel_path, size: it.size });
+        }
+        renderUploadedFiles();
+    } catch (e) {
+        alert('上传出错: ' + e.message);
+    }
+}
+
+function renderUploadedFiles() {
     const list = $('file-list');
     if (!list) return;
     list.innerHTML = '';
-    for (const f of files) {
+    uploadedFiles.forEach((f, idx) => {
         const tag = document.createElement('span');
-        tag.className = 'file-tag';
-        tag.textContent = f.name;
+        tag.className = 'upload-file-tag';
+        tag.innerHTML = `<span title="${escapeHtml(f.rel_path)}">📄 ${escapeHtml(f.name)}</span>` +
+            `<button type="button" title="移除" aria-label="移除">&times;</button>`;
+        tag.querySelector('button').onclick = () => removeUploadedFile(idx);
         list.appendChild(tag);
-    }
+    });
+}
+
+function removeUploadedFile(idx) {
+    uploadedFiles.splice(idx, 1);
+    renderUploadedFiles();
 }
 

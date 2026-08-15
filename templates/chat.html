@@ -78,7 +78,8 @@
     <div class="chat-input-area">
       <div class="chat-input-wrapper" id="chat-input-wrapper">
         <div class="skill-suggestions" id="skill-suggestions"></div>
-        <textarea id="chat-input" class="chat-input" placeholder="输入消息，/ 唤起技能，Shift+Enter 换行" rows="1" onkeydown="handleKey(event)" oninput="handleInput()"></textarea>
+        <div class="skill-suggestions" id="file-suggestions" style="display:none"></div>
+        <textarea id="chat-input" class="chat-input" placeholder="输入消息，/ 唤起技能，@ 引用工作区文件，Shift+Enter 换行" rows="1" onkeydown="handleKey(event)" oninput="handleInput()"></textarea>
         <div class="chat-input-files" id="file-list"></div>
         <div class="chat-input-meta">
           <div class="chat-input-left">

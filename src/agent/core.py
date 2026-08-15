@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from openai import AsyncOpenAI
 
-from ..config import get_config
+from ..config import get_config, get_agent_workdir, BASE_DIR
 from .tools import ToolRegistry, infer_explicit_tool_call, infer_explicit_tool_name
 from .permissions import PermissionManager
 from .memory import load_memory
@@ -168,18 +168,26 @@ class AgentCore:
         logger.info(f"resolve_confirmation called: call_id={call_id!r}, pending={list(self._pending_confirmations.keys())}")
 
         waiter = self._pending_confirmations.get(call_id)
-        if not waiter or waiter.done():
-            # Fallback: if there's exactly one pending confirmation, resolve it
-            # (handles call_id mismatch from models that generate different IDs)
-            active = [(k, w) for k, w in self._pending_confirmations.items() if not w.done()]
-            if len(active) == 1:
-                logger.info(f"call_id mismatch, resolving sole pending: {active[0][0]}")
-                active[0][1].set_result(approved)
-                return True
+        if waiter and not waiter.done():
+            waiter.set_result(approved)
+            return True
+
+        # 兜底：仅当 call_id 对不上、且当前**只有一个**待确认请求时才代为解决，
+        # 用于兼容部分模型生成与流式阶段不一致的 call_id。存在多个并发待确认时
+        # 绝不猜测目标，避免把用户对 A 的决定错误地套用到 B 上。
+        active = [(k, w) for k, w in self._pending_confirmations.items() if not w.done()]
+        if len(active) == 1:
+            logger.info(f"call_id mismatch, resolving sole pending: {active[0][0]}")
+            active[0][1].set_result(approved)
+            return True
+        if len(active) > 1:
+            logger.warning(
+                f"confirm ambiguous: call_id={call_id!r} not found and "
+                f"{len(active)} confirmations pending; refusing to guess"
+            )
+        else:
             logger.warning(f"confirm failed: call_id={call_id!r} not found in pending")
-            return False
-        waiter.set_result(approved)
-        return True
+        return False
 
     def auto_approve_all_pending(self):
         """当用户开启完全访问时，自动批准所有待确认的工具请求。"""
@@ -241,9 +249,20 @@ class AgentCore:
             else "中/高危操作需等待用户确认。"
         )
 
+        workdir = get_agent_workdir()
+        workdir_note = (
+            f"你当前的工作目录（当前目录 / cwd）是：`{workdir}`。\n"
+            f"- 文件工具（read_file/write_file/edit_file/list_dir/glob_files）与 run_command 都以此目录为基准。\n"
+            f"- 传入相对路径（如 `note.txt`、`sub/a.md`）会被解析到该工作目录下；需要访问别处时请使用绝对路径。\n"
+            f"- 当用户说“当前目录”“这里”“工作目录”时，即指上面这个路径。"
+        )
+
         return f"""{memory}{skill_context}
 
 ---
+
+## 运行环境
+{workdir_note}
 
 ## 当前可用工具
 你可以使用以下工具来完成任务。使用 function calling 来调用工具。
@@ -451,7 +470,12 @@ class AgentCore:
                 yield {"type": "done", "content": complete_text, "conversation_id": conversation_id}
                 return
 
-            complete_text += full_content
+            # 若该轮既产生正文又要调用工具，这些正文属于过程性前言，
+            # 通常会在后续轮次被最终答案重述，导致"同一问题回答两遍"。
+            # 因此不并入最终内容，并通知前端丢弃本轮已流式展示的临时正文；
+            # 该正文仍保留在 messages 中供模型自身参考。
+            if full_content.strip():
+                yield {"type": "text_discard"}
 
             # 处理工具调用
             messages.append({

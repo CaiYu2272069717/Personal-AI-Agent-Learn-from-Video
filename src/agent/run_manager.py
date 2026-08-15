@@ -81,22 +81,21 @@ class AgentRunManager:
 
         async def flush_text():
             nonlocal text_buffer, last_flush
-            if text_buffer:
-                # Split large buffers into smaller chunks for progressive UI rendering.
-                # Models like Gemini return content in large blocks; splitting ensures
-                # the frontend event stream receives progressive updates.
-                chunk_size = 80
-                if len(text_buffer) > chunk_size * 2:
-                    while text_buffer:
-                        chunk = text_buffer[:chunk_size]
-                        text_buffer = text_buffer[chunk_size:]
-                        await self._record_event(run_id, {"type": "text", "content": chunk})
-                        if text_buffer:
-                            await asyncio.sleep(0.02)
-                else:
-                    await self._record_event(run_id, {"type": "text", "content": text_buffer})
-                    text_buffer = ""
-                last_flush = asyncio.get_running_loop().time()
+            if not text_buffer:
+                return
+            # 事件持久化后由 SSE 端点按 ~0.1s 轮询批量下发，逐字切片+sleep 不会带来
+            # 更细腻的渐进渲染，只会为长回答累积明显延迟。这里整段写入即可，
+            # 仅当单段异常巨大时才切成较大块，避免单条事件过大。
+            max_event = 4000
+            if len(text_buffer) > max_event:
+                while text_buffer:
+                    chunk = text_buffer[:max_event]
+                    text_buffer = text_buffer[max_event:]
+                    await self._record_event(run_id, {"type": "text", "content": chunk})
+            else:
+                await self._record_event(run_id, {"type": "text", "content": text_buffer})
+                text_buffer = ""
+            last_flush = asyncio.get_running_loop().time()
 
         try:
             async for event in self.agent.chat(
@@ -108,6 +107,12 @@ class AgentRunManager:
                     if len(text_buffer) < 48 and now - last_flush < 0.12:
                         continue
                     await flush_text()
+                    continue
+                if event.get("type") == "text_discard":
+                    # 本轮临时正文（工具调用前言）需被丢弃：清空尚未刷新的缓冲，
+                    # 再转发 text_discard 让前端清除已展示的这段临时文本。
+                    text_buffer = ""
+                    await self._record_event(run_id, event)
                     continue
                 await flush_text()
                 if event.get("type") == "confirm_needed":

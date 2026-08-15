@@ -60,6 +60,8 @@ class PermissionManager:
         from pathlib import Path
         from ..config import BASE_DIR
 
+        from ..config import get_agent_workdir
+
         config = get_config().agent_permission
         target = Path(file_path).resolve()
         base = BASE_DIR.resolve()
@@ -67,6 +69,13 @@ class PermissionManager:
         # 项目目录内：直接允许
         try:
             target.relative_to(base)
+            return True, None
+        except ValueError:
+            pass
+
+        # Agent 工作目录内：直接允许（工作目录可位于项目之外）
+        try:
+            target.relative_to(get_agent_workdir())
             return True, None
         except ValueError:
             pass

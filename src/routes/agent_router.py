@@ -2,9 +2,11 @@
 
 import asyncio
 import json
+import os
+from pathlib import Path
 from typing import Optional, List, Dict
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -12,6 +14,7 @@ from ..agent.core import AgentCore
 from ..agent.memory import load_memory, get_dynamic_section, clear_dynamic_section
 from ..agent.run_manager import get_run_manager, TERMINAL_STATUSES
 from ..agent.snapshots import restore_from_turn
+from ..config import get_agent_workdir
 from ..database import Database
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -41,6 +44,86 @@ class ConfirmRequest(BaseModel):
 class RevertRequest(BaseModel):
     conversation_id: int
     user_message_id: int
+
+
+def _safe_workspace_target(rel: str) -> Path:
+    """把用户/前端给出的相对名解析到工作目录内，禁止越界（.. 逃逸）。"""
+    workdir = get_agent_workdir()
+    candidate = (workdir / rel).resolve(strict=False)
+    try:
+        candidate.relative_to(workdir)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="非法的目标路径")
+    return candidate
+
+
+@router.post("/upload")
+async def upload_files(files: List[UploadFile] = File(...)):
+    """把文件真实保存到 Agent 工作目录，返回可供对话引用的相对路径。"""
+    workdir = get_agent_workdir()
+    saved = []
+    for uf in files:
+        name = os.path.basename(uf.filename or "").strip() or "upload.bin"
+        target = _safe_workspace_target(name)
+        # 重名时追加序号，避免覆盖已有文件。
+        if target.exists():
+            stem, suffix = target.stem, target.suffix
+            i = 1
+            while target.exists():
+                target = _safe_workspace_target(f"{stem}_{i}{suffix}")
+                i += 1
+        content = await uf.read()
+        target.write_bytes(content)
+        saved.append({
+            "name": target.name,
+            "rel_path": target.name,
+            "abs_path": str(target),
+            "size": len(content),
+        })
+    return {"status": "ok", "workdir": str(workdir), "files": saved}
+
+
+@router.get("/workspace-files")
+async def workspace_files(query: str = Query(default="", max_length=200)):
+    """列出工作目录下匹配的文件/文件夹，用于输入框 @ 自动补全。"""
+    workdir = get_agent_workdir()
+    q = (query or "").strip().replace("\\", "/")
+
+    # 支持 "sub/dir/前缀" 形式：在指定子目录内按最后一段前缀过滤。
+    sub, _, prefix = q.rpartition("/")
+    base = workdir
+    if sub:
+        base = (workdir / sub).resolve(strict=False)
+        try:
+            base.relative_to(workdir)
+        except ValueError:
+            return {"items": []}
+    if not base.is_dir():
+        return {"items": []}
+
+    prefix_lower = prefix.lower()
+    items = []
+    try:
+        for entry in sorted(
+            base.iterdir(),
+            key=lambda e: (e.is_file(), e.name.lower()),
+        ):
+            if entry.name.startswith("."):
+                continue
+            if prefix_lower and not entry.name.lower().startswith(prefix_lower):
+                continue
+            rel = entry.relative_to(workdir).as_posix()
+            items.append({
+                "name": entry.name,
+                "rel_path": rel + ("/" if entry.is_dir() else ""),
+                "type": "dir" if entry.is_dir() else "file",
+                "size": entry.stat().st_size if entry.is_file() else 0,
+            })
+            if len(items) >= 30:
+                break
+    except OSError:
+        return {"items": []}
+    return {"workdir": str(workdir), "items": items}
 
 
 @router.post("/chat")
@@ -350,6 +433,8 @@ async def direct_stream_chat(req: StreamChatRequest):
                 # 映射后端事件类型到前端期望格式
                 if event_type == "text":
                     yield f"event: content\ndata: {json.dumps({'content': event.get('content', '')}, ensure_ascii=False)}\n\n"
+                elif event_type == "text_discard":
+                    yield f"event: text_discard\ndata: {json.dumps({}, ensure_ascii=False)}\n\n"
                 elif event_type == "thinking":
                     yield f"event: thinking\ndata: {json.dumps({'content': event.get('content', '')}, ensure_ascii=False)}\n\n"
                 elif event_type == "thinking_done":

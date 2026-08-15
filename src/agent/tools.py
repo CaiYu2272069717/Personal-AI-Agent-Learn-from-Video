@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable
 from dataclasses import dataclass
 
-from ..config import get_config, WORKDIR, BASE_DIR
+from ..config import get_config, WORKDIR, BASE_DIR, get_agent_workdir, resolve_agent_path
 from .snapshots import capture_project_state, record_file_before, record_project_changes
 
 logger = logging.getLogger(__name__)
@@ -251,9 +251,11 @@ class ToolRegistry:
 
         try:
             # 精确记录文件工具；shell 命令通过项目前后状态差异捕获未知改动。
+            # 快照路径需与工具实际写入路径一致（相对路径以 Agent 工作目录解析），
+            # 否则回退时找不到真正被改动的文件。
             if name in {"write_file", "edit_file"} and arguments.get("path"):
                 await record_file_before(
-                    conversation_id, user_message_id, arguments["path"]
+                    conversation_id, user_message_id, resolve_agent_path(arguments["path"])
                 )
             command_state = None
             if name == "run_command" and conversation_id and user_message_id:
@@ -549,7 +551,7 @@ class ToolRegistry:
         return await web_fetch(url)
 
     async def _tool_read_file(self, path: str) -> str:
-        p = Path(path)
+        p = resolve_agent_path(path)
         if not p.exists():
             return json.dumps({"error": f"文件不存在: {path}"}, ensure_ascii=False)
         try:
@@ -561,7 +563,7 @@ class ToolRegistry:
             return json.dumps({"error": "非文本文件，无法读取"}, ensure_ascii=False)
 
     async def _tool_list_dir(self, path: str) -> str:
-        p = Path(path)
+        p = resolve_agent_path(path)
         if not p.exists() or not p.is_dir():
             return json.dumps({"error": f"目录不存在: {path}"}, ensure_ascii=False)
         items = []
@@ -574,20 +576,20 @@ class ToolRegistry:
         return json.dumps(items[:100], ensure_ascii=False)
 
     async def _tool_glob_files(self, pattern: str, path: str = ".") -> str:
-        p = Path(path)
+        p = resolve_agent_path(path)
         if not p.exists():
             return json.dumps({"error": f"路径不存在: {path}"}, ensure_ascii=False)
         files = [str(f) for f in p.rglob(pattern)][:50]
         return json.dumps(files, ensure_ascii=False)
 
     async def _tool_write_file(self, path: str, content: str) -> str:
-        p = Path(path)
+        p = resolve_agent_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding='utf-8')
         return json.dumps({"status": "ok", "path": str(p), "size": len(content)}, ensure_ascii=False)
 
     async def _tool_edit_file(self, path: str, old_text: str, new_text: str) -> str:
-        p = Path(path)
+        p = resolve_agent_path(path)
         if not p.exists():
             return json.dumps({"error": f"文件不存在: {path}"}, ensure_ascii=False)
         content = p.read_text(encoding='utf-8')
@@ -606,7 +608,7 @@ class ToolRegistry:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                cwd=str(BASE_DIR),
+                cwd=str(get_agent_workdir()),
             )
             output = result.stdout[-3000:] if result.stdout else ""
             error = result.stderr[-1000:] if result.stderr else ""

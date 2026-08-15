@@ -94,6 +94,7 @@ class PipelineConfig:
 class AgentPermissionConfig:
     """Agent 权限配置"""
     full_access: bool = False  # 完全访问开关
+    working_dir: str = ""  # Agent 工作目录（空=默认 workspace/）；相对路径以其为基准解析
     trusted_dirs: list = field(default_factory=list)
     command_blacklist: list = field(default_factory=lambda: [
         "rm -rf /", "rm -rf /*",
@@ -224,3 +225,34 @@ def reload_config() -> AppConfig:
     global _config
     _config = load_config()
     return _config
+
+
+def get_agent_workdir() -> Path:
+    """返回 Agent 当前工作目录。
+
+    优先使用配置中的 agent_permission.working_dir；未设置或无效时回退到默认
+    workspace/。相对路径以项目根目录解析。目录不存在会尝试创建。
+    """
+    raw = (get_config().agent_permission.working_dir or "").strip()
+    if raw:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = BASE_DIR / candidate
+    else:
+        candidate = WORKSPACE_DIR
+    try:
+        candidate.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return WORKSPACE_DIR
+    return candidate.resolve(strict=False)
+
+
+def resolve_agent_path(path: str) -> Path:
+    """将 Agent 传入的路径解析为绝对路径。
+
+    绝对路径原样返回；相对路径以 Agent 工作目录为基准，使“工作目录”设置真正生效。
+    """
+    candidate = Path(path).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    return (get_agent_workdir() / candidate).resolve(strict=False)

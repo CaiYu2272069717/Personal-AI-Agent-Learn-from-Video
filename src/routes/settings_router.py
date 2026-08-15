@@ -119,7 +119,10 @@ async def update_settings(payload: dict):
             current[section] = values
 
     # 重建并保存
-    from ..config import ASRConfig, LLMConfig, AgentLLMConfig, EmbeddingConfig, OCRConfig, WebSearchConfig, PipelineConfig, AgentPermissionConfig
+    from ..config import (
+        ASRConfig, LLMConfig, AgentLLMConfig, EmbeddingConfig, OCRConfig,
+        WebSearchConfig, PipelineConfig, AgentPermissionConfig, MCPConfig, SkillConfig,
+    )
     new_config = AppConfig(
         asr=ASRConfig(**current["asr"]),
         llm=LLMConfig(**current["llm"]),
@@ -129,6 +132,9 @@ async def update_settings(payload: dict):
         web_search=WebSearchConfig(**current["web_search"]),
         pipeline=PipelineConfig(**current["pipeline"]),
         agent_permission=AgentPermissionConfig(**current["agent_permission"]),
+        # 保留 mcp/skill 两段，避免保存设置时把用户自定义的服务器/技能目录重置为默认。
+        mcp=MCPConfig(**current.get("mcp", {})),
+        skill=SkillConfig(**current.get("skill", {})),
         host=current["host"],
         port=current["port"],
     )
